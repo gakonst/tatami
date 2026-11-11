@@ -834,37 +834,46 @@ fn quit_from_signal() void {
 /// What main was started with, to start over once the permission has been granted.
 pub var restart_argv: ?[*]const ?[*:0]const u8 = null;
 
+/// Set in the environment of the processes that wait for the permission after the first.
+const waiting_variable = "TATAMI_WAITING";
+
 /// Asks for the Accessibility permission, once, and waits for it. Exiting instead would
 /// have launchd start us over and over, and the user would have nothing to click on.
-/// Once granted we start over as a fresh process, which is known to see the permission.
-fn accessibility_wait() void {
-    const keys = [_]Ref{c.kAXTrustedCheckOptionPrompt};
-    const values = [_]Ref{c.kCFBooleanTrue};
-    const options = c.CFDictionaryCreate(
-        null,
-        &keys,
-        &values,
-        keys.len,
-        &c.kCFTypeDictionaryKeyCallBacks,
-        &c.kCFTypeDictionaryValueCallBacks,
-    );
-    assert(options != null);
-    _ = c.AXIsProcessTrustedWithOptions(options);
-    c.CFRelease(options);
-    std.debug.print(
-        "tatami: waiting for the Accessibility permission. Grant it to tatami, or to the\n" ++
-            "program that starts it, in System Settings > Privacy & Security >\n" ++
-            "Accessibility.\n",
-        .{},
-    );
-    // Not bounded on purpose: this waits for a person.
-    while (c.AXIsProcessTrusted() == 0) _ = c.usleep(1_000_000);
-    std.debug.print("tatami: Accessibility granted\n", .{});
+///
+/// A running process never sees the permission arrive: the answer is cached (seen live,
+/// the first version polled for an hour and a half after it was granted). So every two
+/// seconds we start over as a fresh process, which asks again.
+fn accessibility_wait() noreturn {
+    if (c.getenv(waiting_variable) == null) {
+        const keys = [_]Ref{c.kAXTrustedCheckOptionPrompt};
+        const values = [_]Ref{c.kCFBooleanTrue};
+        const options = c.CFDictionaryCreate(
+            null,
+            &keys,
+            &values,
+            keys.len,
+            &c.kCFTypeDictionaryKeyCallBacks,
+            &c.kCFTypeDictionaryValueCallBacks,
+        );
+        assert(options != null);
+        _ = c.AXIsProcessTrustedWithOptions(options);
+        c.CFRelease(options);
+        std.debug.print(
+            "tatami: waiting for the Accessibility permission. Grant it to tatami, or to\n" ++
+                "the program that starts it, in System Settings > Privacy & Security >\n" ++
+                "Accessibility.\n",
+            .{},
+        );
+        _ = c.setenv(waiting_variable, "1", 1);
+    }
+    _ = c.usleep(2_000_000);
     var path: [1024]u8 = undefined;
     var size: u32 = path.len;
     if (restart_argv) |argv| {
         if (c._NSGetExecutablePath(&path, &size) == 0) _ = c.execv(@ptrCast(&path), argv);
     }
+    // Could not start over: leave it to whoever started us.
+    c.exit(1);
 }
 
 fn secure_input_warn() void {
@@ -910,6 +919,10 @@ pub fn run() noreturn {
     for (&apps) |*app| app.* = .{};
     for (&windows) |*window| window.* = .{};
     if (c.AXIsProcessTrusted() == 0) accessibility_wait();
+    if (c.getenv(waiting_variable) != null) {
+        std.debug.print("tatami: Accessibility granted\n", .{});
+        _ = c.unsetenv(waiting_variable);
+    }
     ax.init();
     _ = c.NSApplicationLoad();
     const application = c.send(c.objc_getClass("NSApplication"), "sharedApplication");

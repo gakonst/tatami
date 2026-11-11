@@ -275,6 +275,8 @@ pub const sig_ign: usize = 1;
 pub extern "c" fn clock_gettime(clock: c_int, time: *Timespec) c_int;
 pub extern "c" fn getuid() u32;
 pub extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+pub extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+pub extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 pub extern "c" fn socket(domain: c_int, kind: c_int, protocol: c_int) c_int;
 pub extern "c" fn bind(fd: c_int, address: *const SockaddrUn, len: u32) c_int;
 pub extern "c" fn listen(fd: c_int, backlog: c_int) c_int;

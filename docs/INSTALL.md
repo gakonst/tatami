@@ -55,7 +55,9 @@ Security > Accessibility).
 ```
 
 The first start asks for the Accessibility permission and waits; once tatami is allowed
-in System Settings > Privacy & Security > Accessibility it starts by itself. The log is
+in System Settings > Privacy & Security > Accessibility it starts by itself within a few
+seconds. If it does not, `launchctl kickstart -k gui/$(id -u)/xyz.gakonst.tatami` starts
+it over. The log is
 `~/Library/Logs/tatami.log`.
 
 - After a crash launchd starts it again, once parked windows are back on screen. After
