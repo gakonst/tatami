@@ -3,8 +3,12 @@
 # ~/.local/bin and loads a launchd agent. The first start asks for the Accessibility
 # permission and waits until it is granted.
 #
-# Accessibility is granted to this exact binary. After installing a new build, macOS may
-# show tatami as allowed while refusing it: remove tatami from the list and allow it again.
+# Accessibility is granted to a signature. An unsigned build is a new signature every
+# time, and macOS then shows tatami as allowed while refusing it: remove tatami from the
+# list and allow it again. To keep the permission across builds, name a code signing
+# identity of yours (security find-identity -v -p codesigning) in TATAMI_SIGN_IDENTITY or
+# in ~/.config/tatami/sign-identity; the first signed install needs the permission once
+# more, later ones keep it.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -19,6 +23,16 @@ domain="gui/$(id -u)"
 launchctl bootout "$domain/$label" 2>/dev/null || true
 mkdir -p "$(dirname "$bin")" "$(dirname "$plist")" "$(dirname "$log")"
 cp zig-out/bin/tatami "$bin.new"
+identity="${TATAMI_SIGN_IDENTITY:-}"
+if [ -z "$identity" ] && [ -f "$HOME/.config/tatami/sign-identity" ]; then
+    identity="$(cat "$HOME/.config/tatami/sign-identity")"
+fi
+if [ -n "$identity" ]; then
+    codesign --force --sign "$identity" --identifier "$label" "$bin.new"
+    echo "signed as $label with: $identity"
+else
+    echo "not signed: the Accessibility permission will not survive the next build"
+fi
 mv -f "$bin.new" "$bin"
 
 cat > "$plist" <<PLIST

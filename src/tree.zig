@@ -212,6 +212,46 @@ pub const Forest = struct {
         forest.layout_node(target, 0);
     }
 
+    /// Adds a window beside a whole subtree: the subtree and the window become the two
+    /// halves of a new split, which takes the subtree's place in the tree.
+    pub fn insert_beside(
+        forest: *Forest,
+        root: *NodeIndex,
+        target: NodeIndex,
+        window: WindowId,
+        direction: Direction,
+    ) void {
+        assert(window != 0);
+        assert(forest.leaf_find(window) == node_none);
+        assert(forest.free_count >= 2);
+        assert(target != node_none and forest.nodes[target].in_use);
+        assert(forest.root_of(target) == root.*);
+        const split = forest.acquire();
+        const added = forest.acquire();
+        const parent = forest.nodes[target].parent;
+        const leading = direction.is_leading();
+        forest.nodes[split] = .{
+            .in_use = true,
+            .parent = parent,
+            .split = if (direction.axis() == .x) .columns else .rows,
+            .rect = forest.nodes[target].rect,
+            .first = if (leading) added else target,
+            .second = if (leading) target else added,
+        };
+        forest.nodes[added] = .{ .in_use = true, .parent = split, .window = window };
+        forest.nodes[target].parent = split;
+        if (parent == node_none) {
+            assert(root.* == target);
+            root.* = split;
+        } else if (forest.nodes[parent].first == target) {
+            forest.nodes[parent].first = split;
+        } else {
+            assert(forest.nodes[parent].second == target);
+            forest.nodes[parent].second = split;
+        }
+        forest.layout_node(split, 0);
+    }
+
     /// Removes the window's leaf; its sibling takes the place of their parent.
     pub fn remove(forest: *Forest, root: *NodeIndex, window: WindowId) void {
         const leaf = forest.leaf_find(window);

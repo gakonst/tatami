@@ -255,6 +255,43 @@ test "workspaces switch with one frame per window and come back exactly" {
     try testing.expect(!parked(c) and !parked(d));
 }
 
+test "warp with nobody on that side puts the window there" {
+    // Asked for: cmd-shift-j and cmd-shift-k 'so i can put a window down / below another'.
+    const os = boot("");
+    const app = os.app_launch("Zed", "dev.zed.Zed");
+    const a = open(os, app, .{});
+    const b = open(os, app, .{});
+    os.settle();
+    try testing.expectEqual(b, engine.focused_window);
+    try testing.expect(frame_of(a).x < frame_of(b).x and frame_of(a).y == frame_of(b).y);
+    // Side by side, the focused window goes below the other one.
+    os.command_run("warp south");
+    os.settle();
+    try testing.expect(frame_of(a).y < frame_of(b).y and frame_of(a).x == frame_of(b).x);
+    try testing.expectEqual(screen.w, frame_of(a).w);
+    try testing.expectEqual(screen.w, frame_of(b).w);
+    try testing.expectEqual(screen.h, frame_of(a).h + frame_of(b).h);
+    try testing.expectEqual(b, engine.focused_window);
+    // With a neighbour on that side it trades places with it, as before.
+    os.command_run("warp north");
+    os.settle();
+    try testing.expect(frame_of(b).y < frame_of(a).y);
+    // And back to side by side, on the side that was asked for.
+    os.command_run("warp west");
+    os.settle();
+    try testing.expect(frame_of(b).x < frame_of(a).x and frame_of(a).y == frame_of(b).y);
+    try testing.expectEqual(screen.h, frame_of(a).h);
+    // A third window that is at the bottom of its column moves under everything.
+    const c = open(os, app, .{});
+    os.settle();
+    os.command_run("warp south");
+    os.settle();
+    const below = frame_of(c);
+    try testing.expectEqual(screen.w, below.w);
+    try testing.expect(below.y > frame_of(a).y and below.y > frame_of(b).y);
+    try testing.expectEqual(c, engine.focused_window);
+}
+
 test "an empty workspace stays when a hidden application repeats its focus" {
     // Seen live: 800 ms after switching to an empty workspace, the browser announced the
     // focus it already had and the old workspace came straight back.

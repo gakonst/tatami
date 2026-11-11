@@ -1598,7 +1598,11 @@ pub const Engine = struct {
         const window = engine.focused() orelse return;
         if (!window.in_layout()) return;
         const target = engine.neighbor(window, direction, true) orelse {
-            return engine.window_cross_monitor(window, direction);
+            const from = engine.workspace_monitor(window.workspace);
+            if (engine.monitor_neighbor(from, direction) != null) {
+                return engine.window_cross_monitor(window, direction);
+            }
+            return engine.window_restack(window, direction);
         };
         const forest = &engine.forest;
         const leaf = forest.leaf_find(window.id);
@@ -1612,6 +1616,34 @@ pub const Engine = struct {
         forest.remove(&workspace.root, window.id);
         const anchor = forest.leaf_find(target.id);
         forest.insert(&workspace.root, anchor, window.id, .{ .side = direction.opposite() });
+    }
+
+    /// With nobody on that side, the window goes there itself: it leaves the nearest split
+    /// that runs the other way and becomes one half of a new split with what is left of
+    /// it. Of two windows side by side, 'warp south' puts the focused one below the other.
+    fn window_restack(engine: *Engine, window: *Window, direction: Direction) void {
+        assert(window.in_layout());
+        const forest = &engine.forest;
+        const workspace = &engine.workspaces[window.workspace];
+        const leaf = forest.leaf_find(window.id);
+        const across: tree.Split = if (direction.axis() == .x) .rows else .columns;
+        var child = leaf;
+        var ancestor = forest.nodes[leaf].parent;
+        var depth: u32 = 0;
+        while (ancestor != node_none and forest.nodes[ancestor].split != across) {
+            assert(depth < tree.nodes_max);
+            depth += 1;
+            child = ancestor;
+            ancestor = forest.nodes[ancestor].parent;
+        }
+        if (ancestor == node_none) return; // Already as far that way as it can be.
+        // What is left of the split once the window is gone: the split itself, or the
+        // window's sibling when the window was one of its two halves.
+        const node = forest.nodes[ancestor];
+        const sibling = if (node.first == leaf) node.second else node.first;
+        const remains = if (child == leaf) sibling else ancestor;
+        forest.remove(&workspace.root, window.id);
+        forest.insert_beside(&workspace.root, remains, window.id, direction);
     }
 
     fn command_resize(engine: *Engine, edge: Direction, delta: i32) void {

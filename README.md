@@ -26,8 +26,8 @@ Checked live, each against an independent Accessibility read of every window:
 
 Not checked live yet: hot keys that use only option or option-shift (Secure Input was on
 during the trial, see [docs/INSTALL.md](docs/INSTALL.md)), `tatami rescue` with windows
-actually parked, binding modes, more than one display, native tabs, sticky windows, rules, applications
-that hang.
+actually parked, binding modes, warp with nobody on that side (simulated only), more than
+one display, native tabs, sticky windows, rules, applications that hang.
 
 Measured live, from the command line including process start: focus 15 to 55 ms, workspace
 switch 45 to 100 ms. Almost all of it is the applications answering Accessibility calls;

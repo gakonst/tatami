@@ -63,8 +63,12 @@ it over. The log is
 - After a crash launchd starts it again, once parked windows are back on screen. After
   `tatami quit` it stays stopped until
   `launchctl kickstart gui/$(id -u)/xyz.gakonst.tatami`.
-- The permission belongs to the exact binary. After installing a new build macOS may list
-  tatami as allowed and still refuse it: remove it from the list and allow it again.
+- The permission belongs to a signature. An unsigned build is a new one every time: macOS
+  then lists tatami as allowed and still refuses it, until it is removed from the list
+  and allowed again. To keep the permission across builds, name one of your code signing
+  identities (`security find-identity -v -p codesigning`) in
+  `~/.config/tatami/sign-identity` or `TATAMI_SIGN_IDENTITY`; `install.sh` then signs the
+  binary with it.
 
 ## Run at login (home-manager)
 
