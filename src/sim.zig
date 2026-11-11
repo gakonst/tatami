@@ -55,6 +55,8 @@ const SimWindow = struct {
     tab_group: u32 = 0,
     title: []const u8 = "",
     adopted: bool = false,
+    /// macOS never lets this much of the top of the window sink below the screen.
+    title_bar: i32 = 0,
 };
 
 const SimApp = struct {
@@ -108,6 +110,9 @@ const app_templates = [_]AppTemplate{
 };
 
 const titles = [_][]const u8{ "Untitled", "main.zig", "Inbox", "Tempo Wallet", "Huddle", "~" };
+
+/// What real applications were seen to insist on: nothing, 32 pixels, 40 pixels.
+const title_bars = [_]i32{ 0, 28, 32, 40 };
 
 const monitor_presets = [_][]const MonitorInfo{
     &.{monitor(1, 0, 0, 1728, 1117, true)},
@@ -322,12 +327,13 @@ pub const Simulator = struct {
             );
             return;
         }
-        const target: Rect = .{
+        var target: Rect = .{
             .x = frame.x,
             .y = frame.y,
             .w = @max(frame.w, window.min_w),
             .h = @max(frame.h, window.min_h),
         };
+        target.y = simulator.title_bar_keep(window, target);
         // The shell reads the frame back right after setting it, before any notification
         // about the change can arrive; an animating window is only part of the way there.
         var result = target;
@@ -360,6 +366,20 @@ pub const Simulator = struct {
                 .{ .at_ms = 0, .seq = 0, .kind = .self_move, .id = id },
             );
         }
+    }
+
+    /// A window that would hang off the bottom of the screen is lifted until its title bar
+    /// is back on it, as macOS does.
+    fn title_bar_keep(simulator: *Simulator, window: *const SimWindow, target: Rect) i32 {
+        if (window.title_bar == 0) return target.y;
+        var bottom: ?i32 = null;
+        for (simulator.monitors) |*info| {
+            if (target.overlap(info.frame, .x) <= 0) continue;
+            bottom = @max(bottom orelse info.frame.bottom(), info.frame.bottom());
+        }
+        const floor = (bottom orelse return target.y) - window.title_bar;
+        if (target.bottom() <= floor + window.title_bar) return target.y;
+        return @min(target.y, floor);
     }
 
     /// Sets the frame of a window and of its tab group, and queues the notifications.
@@ -403,6 +423,13 @@ pub const Simulator = struct {
         };
     }
 
+    /// Tells the engine where focus is: as a notification, or as the answer to its question.
+    fn deliver_focus(simulator: *Simulator, notice: bool) void {
+        const id = simulator.focused;
+        simulator.flush_appeared(id);
+        simulator.step(if (notice) .{ .window_focused = id } else .{ .focus_reported = id });
+    }
+
     fn deliver(simulator: *Simulator, entry: Queued) void {
         switch (entry.kind) {
             .appeared => {
@@ -441,14 +468,7 @@ pub const Simulator = struct {
                     .tab_of = simulator.tab_peer(window),
                 } });
             },
-            .focused => {
-                simulator.flush_appeared(simulator.focused);
-                simulator.step(.{ .window_focused = simulator.focused });
-            },
-            .focus_report => {
-                simulator.flush_appeared(simulator.focused);
-                simulator.step(.{ .focus_reported = simulator.focused });
-            },
+            .focused, .focus_report => simulator.deliver_focus(entry.kind == .focused),
             .app_launched => {
                 const app = simulator.app_find(entry.pid) orelse return;
                 simulator.step(.{
@@ -521,6 +541,7 @@ pub const Simulator = struct {
         focus: bool = true,
         /// Reported as a window that was open before the window manager started.
         adopted: bool = false,
+        title_bar: i32 = 0,
     };
 
     pub fn app_launch(simulator: *Simulator, name: []const u8, bundle: []const u8) i32 {
@@ -546,6 +567,7 @@ pub const Simulator = struct {
         var min_w = options.min_w;
         var min_h = options.min_h;
         var animates = options.animates;
+        var title_bar = options.title_bar;
         if (simulator.window_find(options.tab_of)) |peer| {
             assert(peer.pid == pid);
             if (peer.tab_group == 0) {
@@ -558,6 +580,7 @@ pub const Simulator = struct {
             min_w = peer.min_w;
             min_h = peer.min_h;
             animates = peer.animates;
+            title_bar = peer.title_bar;
             peer.stubborn = false;
         }
         window.* = .{
@@ -574,6 +597,7 @@ pub const Simulator = struct {
             .tab_group = group,
             .title = options.title,
             .adopted = options.adopted,
+            .title_bar = title_bar,
         };
         simulator.window_id_next += 1;
         simulator.push(
@@ -681,6 +705,11 @@ pub const Simulator = struct {
     /// The application stops answering Accessibility calls for a while.
     pub fn app_hang(simulator: *Simulator, pid: i32, ms: u64) void {
         simulator.app_find(pid).?.unresponsive_until_ms = simulator.now_ms + ms;
+    }
+
+    /// The focused application announces its focus again, as browsers do.
+    pub fn focus_repeat(simulator: *Simulator) void {
+        simulator.push(0, .{ .at_ms = 0, .seq = 0, .kind = .focused });
     }
 
     pub fn window_click(simulator: *Simulator, id: WindowId) void {
@@ -835,6 +864,7 @@ pub const Simulator = struct {
             .late_title = prng.chance(1, 5),
             .focus = prng.chance(9, 10),
             .adopted = prng.chance(1, 10),
+            .title_bar = if (faults) title_bars[prng.below(title_bars.len)] else 0,
         });
     }
 
@@ -905,15 +935,20 @@ pub const Simulator = struct {
             assert(known.desired_valid);
             assert(!known.set_pending);
             if (known.frozen or window.stubborn) continue;
-            // Every window is where it should be, as far as its minimum size allows.
+            // Every window is where it should be, as far as its minimum size and the
+            // title bar rule of macOS allow.
             const expected: Rect = .{
                 .x = known.desired.x,
                 .y = known.desired.y,
                 .w = @max(known.desired.w, window.min_w),
                 .h = @max(known.desired.h, window.min_h),
             };
-            if (!window.frame.eql(expected)) simulator.report(window, known, expected);
-            assert(window.frame.eql(expected));
+            // A window too tall for its tile hangs off the screen, and macOS lifts it.
+            var lifted = expected;
+            lifted.y = simulator.title_bar_keep(window, expected);
+            const agrees = window.frame.eql(expected) or window.frame.eql(lifted);
+            if (!agrees) simulator.report(window, known, expected);
+            assert(agrees);
             if (!engine.workspace_visible(known.workspace)) {
                 // Hidden windows show at most a one pixel sliver on their monitor.
                 const own = engine.monitors[engine.workspace_monitor(known.workspace)].frame;

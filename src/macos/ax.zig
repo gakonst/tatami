@@ -18,6 +18,7 @@ pub const Error = error{ Unresponsive, Invalid, Failed };
 pub const Names = struct {
     windows: Ref,
     focused_window: Ref,
+    main_window: Ref,
     position: Ref,
     size: Ref,
     title: Ref,
@@ -55,10 +56,44 @@ fn name(text: [*:0]const u8) Ref {
     return string;
 }
 
+/// The process that holds Secure Input, 0 when nobody does, -1 when it cannot be told.
+/// While it is held, macOS delivers no hot key whose only modifiers are option and shift:
+/// the key types its character instead. A loginwindow that never lets go after the screen
+/// was unlocked is the usual culprit.
+pub fn secure_input_pid() i32 {
+    if (c.IsSecureEventInputEnabled() == 0) return 0;
+    const session = c.CGSessionCopyCurrentDictionary();
+    if (session == null) return -1;
+    defer c.CFRelease(session);
+    const key = name("kCGSSessionSecureInputPID");
+    defer c.CFRelease(key);
+    const number = c.CFDictionaryGetValue(session, key);
+    var pid: i32 = 0;
+    if (number == null or c.CFNumberGetValue(number, c.number_type_sint32, &pid) == 0) {
+        return -1;
+    }
+    return if (pid > 0) pid else -1;
+}
+
+pub const secure_input_advice =
+    "Until it is released, keys bound with only option or option-shift type their\n" ++
+    "character instead of reaching tatami. When loginwindow holds it, locking and\n" ++
+    "unlocking the screen usually releases it; otherwise leave the password field or\n" ++
+    "quit the application that holds it.\n";
+
+/// The name of the process that holds Secure Input, null when nobody does.
+pub fn secure_input_holder(buffer: []u8, pid: *i32) ?[]const u8 {
+    pid.* = secure_input_pid();
+    if (pid.* == 0) return null;
+    const length = if (pid.* > 0) c.proc_name(pid.*, buffer.ptr, @intCast(buffer.len)) else 0;
+    return if (length > 0) buffer[0..@intCast(length)] else "unknown";
+}
+
 pub fn init() void {
     names = .{
         .windows = name("AXWindows"),
         .focused_window = name("AXFocusedWindow"),
+        .main_window = name("AXMainWindow"),
         .position = name("AXPosition"),
         .size = name("AXSize"),
         .title = name("AXTitle"),
@@ -156,9 +191,15 @@ pub fn size_set(element: Ref, w: i32, h: i32) Error!void {
     try check(c.AXUIElementSetAttributeValue(element, names.size, value));
 }
 
-/// Moves and resizes a window, then reads back where it actually ended up.
-pub fn frame_set(element: Ref, frame: Rect) Error!Rect {
+/// Moves and resizes a window, then reads back where it actually ended up. When the size
+/// is believed to be right already, only the position is set: a move is much cheaper for
+/// an application than a resize, and switching workspaces is nothing but moves.
+pub fn frame_set(element: Ref, frame: Rect, move_only: bool) Error!Rect {
     try position_set(element, frame.x, frame.y);
+    if (move_only) {
+        const moved = try frame_get(element);
+        if (moved.w == frame.w and moved.h == frame.h) return moved;
+    }
     try size_set(element, frame.w, frame.h);
     return frame_get(element);
 }

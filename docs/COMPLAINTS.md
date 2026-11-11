@@ -16,8 +16,9 @@ shell behaviour and have not been exercised against real windows yet.
 | A config error killed every binding | A config with an error is rejected as a whole and the previous one stays active. | `config.zig` tests |
 | Live reload deadlocked | Reload is one event like any other. | — |
 | Windows of background test runs pop up in front | A window sent to a workspace by a rule does not take focus or switch the workspace. | "a window sent away by a rule does not pull focus…" |
-| Option-f types "ƒ" | Hot keys are registered with the OS, which consumes them. A key that fails to register is printed at startup. | — |
+| Option-f types "ƒ" | Hot keys are registered with the OS, which consumes them. A key that fails to register is printed at startup. The other cause is Secure Input: while any application holds it, macOS delivers no hot key whose only modifiers are option and shift, to any window manager. `tatami check` and startup name the application that holds it. | Seen live |
 | A window whose title arrives late misses its floating rule | Title rules keep applying for 3 s after the window appears. | "a title that arrives late still matches its rule…" |
 | Popups and helper windows get tiled | Only standard windows tile; popups are never tracked. | "popups and helper windows are never tiled" |
 | Workspaces get lost when a monitor is unplugged | Workspaces remember their display and return to it. | "workspaces return to a monitor that is unplugged and plugged back in" |
+| Switching to an empty workspace bounces back | A hidden application that announces again the focus it already had (browsers do, constantly) is ignored. Found in the live trial. | "an empty workspace stays when a hidden application repeats its focus" |
 | "bring back up", "reset" | `tatami quit` and `tatami rescue` bring every parked window back on screen. A crash does the same. | "quitting brings every parked window back on screen" |

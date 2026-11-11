@@ -255,6 +255,59 @@ test "workspaces switch with one frame per window and come back exactly" {
     try testing.expect(!parked(c) and !parked(d));
 }
 
+test "an empty workspace stays when a hidden application repeats its focus" {
+    // Seen live: 800 ms after switching to an empty workspace, the browser announced the
+    // focus it already had and the old workspace came straight back.
+    const os = boot("");
+    const app = os.app_launch("Brave Browser", "com.brave.Browser");
+    const a = open(os, app, .{});
+    const other = os.app_launch("Zed", "dev.zed.Zed");
+    const b = open(os, other, .{ .focus = false });
+    os.settle();
+    os.window_click(a);
+    os.settle();
+    try testing.expectEqual(a, engine.focused_window);
+    os.command_run("workspace 9");
+    os.settle();
+    try testing.expect(parked(a) and parked(b));
+    for (0..5) |_| {
+        os.advance(800);
+        os.focus_repeat();
+        os.settle();
+        try testing.expect(parked(a) and parked(b));
+    }
+    // Really going to another window of a hidden workspace still brings it back.
+    os.window_click(b);
+    os.settle();
+    try testing.expect(!parked(a) and !parked(b));
+    try testing.expectEqual(b, engine.focused_window);
+}
+
+test "a parked window that macOS lifts is not asked twice" {
+    // Seen live: parked at the very bottom, windows came back 32 or 40 pixels higher,
+    // and every workspace switch retried every frame.
+    const os = boot("");
+    const app = os.app_launch("Zed", "dev.zed.Zed");
+    const a = open(os, app, .{ .title_bar = 32 });
+    const b = open(os, app, .{ .title_bar = 40 });
+    os.settle();
+    const frames = [2]Rect{ frame_of(a), frame_of(b) };
+    for (0..3) |_| {
+        var sets = os.frames_set;
+        os.command_run("workspace 2");
+        os.settle();
+        try testing.expectEqual(@as(u64, 2), os.frames_set - sets);
+        try testing.expect(parked(a) and parked(b));
+        sets = os.frames_set;
+        os.command_run("workspace 1");
+        os.settle();
+        try testing.expectEqual(@as(u64, 2), os.frames_set - sets);
+        try expect_frame(frames[0], a);
+        try expect_frame(frames[1], b);
+    }
+    try testing.expectEqual(@as(u64, 0), engine.stats.frames_retried);
+}
+
 test "a sticky window stays on screen across workspaces" {
     // AeroSpace has no sticky windows (its pull request 2083 was tried and reverted).
     const os = boot("");

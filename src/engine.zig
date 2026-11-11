@@ -50,6 +50,8 @@ pub const quiet_ms: u64 = 1500;
 /// After the focused window goes away, focus may not jump to a hidden workspace.
 pub const guard_ms: u64 = 400;
 pub const focus_pending_ms: u64 = 500;
+/// The most a parked window may be lifted; beyond this something else is going on.
+pub const park_lift_max: i32 = 256;
 pub const backoff_min_ms: u32 = 250;
 pub const backoff_max_ms: u32 = 8000;
 
@@ -166,6 +168,8 @@ pub const Window = struct {
     quiet_until_ms: u64 = 0,
     focus_seq: u64 = 0,
     sets_total: u32 = 0,
+    /// How far above the parking spot macOS insists on keeping this window (see lifted).
+    park_lift: i32 = 0,
 
     pub fn title_slice(window: *const Window) []const u8 {
         return window.title[0..window.title_len];
@@ -230,6 +234,7 @@ pub const Stats = struct {
     effects: u64 = 0,
     frames_set: u64 = 0,
     frames_retried: u64 = 0,
+    frames_lifted: u64 = 0,
     frames_corrected: u64 = 0,
     windows_auto_floated: u64 = 0,
     windows_dropped: u64 = 0,
@@ -252,6 +257,8 @@ pub const Engine = struct {
     focus_seq: u64,
     focus_pending: [focus_pending_max]FocusPending,
     focus_pending_count: u32,
+    /// The window the OS last said has keyboard focus, whatever we made of it.
+    os_focus: WindowId,
     guard_until_ms: u64,
     /// Set when we can no longer be sure where OS focus is; answered by focus_reported.
     focus_stale: bool,
@@ -277,6 +284,7 @@ pub const Engine = struct {
         engine.recent_workspace = 0;
         engine.focus_seq = 0;
         engine.focus_pending_count = 0;
+        engine.os_focus = 0;
         engine.guard_until_ms = 0;
         engine.focus_stale = false;
         engine.stopped = false;
@@ -661,6 +669,8 @@ pub const Engine = struct {
     /// The OS tells us where focus is: as a notification that it moved (reported false),
     /// or as the answer to a query_focus of ours (reported true).
     fn focus_observe(engine: *Engine, id: WindowId, reported: bool) void {
+        const repeated = id == engine.os_focus;
+        engine.os_focus = id;
         // An echo of a request of ours confirms it and everything requested before it.
         for (engine.focus_pending[0..engine.focus_pending_count], 0..) |pending, index| {
             if (pending.id != id) continue;
@@ -683,6 +693,10 @@ pub const Engine = struct {
         if (id == engine.focused_window) return;
         if (window.tab_of != 0) engine.tab_promote(window);
         const hidden = !engine.workspace_visible(window.workspace);
+        // An application that announces again the focus it already had is not the user
+        // going there. Browsers do this all the time; following it would undo every switch
+        // to an empty workspace.
+        if (!reported and repeated and hidden) return;
         if (reported) {
             // An answer is not a focus change: it never switches workspace or monitor.
             if (hidden) {
@@ -869,6 +883,7 @@ pub const Engine = struct {
             engine.forest.remove(&workspace.root, id);
         }
         if (workspace.last_focus == id) workspace.last_focus = 0;
+        if (engine.os_focus == id) engine.os_focus = 0;
         engine.focus_pending_remove(id);
         window.* = .{};
         if (heir) |next| engine.membership_sync(next);
@@ -1128,10 +1143,33 @@ pub const Engine = struct {
         window.actual = frame;
         engine.apps[window.app].backoff_ms = 0;
         if (!window.desired_valid or frame.eql(window.desired)) return;
+        if (engine.lifted(window, frame)) return;
         if (window.attempts >= attempts_max) return; // It has a mind of its own; accept it.
         window.attempts += 1;
         engine.stats.frames_retried += 1;
         engine.frame_send(window);
+    }
+
+    /// macOS keeps the title bar of every window reachable: a frame that would put it
+    /// below the screen comes back higher, by an amount that depends on the application.
+    /// That is the answer of the OS, not something to ask for twice. A parked window
+    /// remembers the lift, so the next time it is parked it goes straight there.
+    fn lifted(engine: *Engine, window: *Window, frame: Rect) bool {
+        const desired = window.desired;
+        if (frame.x != desired.x or frame.w != desired.w or frame.h != desired.h) return false;
+        if (frame.y >= desired.y) return false;
+        const lift = desired.y - frame.y;
+        if (!engine.workspace_visible(window.workspace)) {
+            if (window.park_lift + lift > park_lift_max) return false;
+            window.park_lift += lift;
+        } else if (window.mode == .floating and window.zoom == .none) {
+            window.float_rect.y = frame.y;
+        } else {
+            return false;
+        }
+        window.desired.y = frame.y;
+        engine.stats.frames_lifted += 1;
+        return true;
     }
 
     fn on_frame_changed(engine: *Engine, id: WindowId, frame: Rect, by_user: bool) void {
@@ -1300,7 +1338,7 @@ pub const Engine = struct {
     /// corners, the one that shows less of the window on the other monitors wins.
     fn park_rect(engine: *const Engine, monitor_index: u8, window: *const Window) Rect {
         const frame = engine.monitors[monitor_index].frame;
-        const y = frame.bottom() - 1;
+        const y = frame.bottom() - 1 - window.park_lift;
         // Keep the size it was parked with, so a parked window is never asked twice.
         const parked = window.desired_valid and window.desired.y == y;
         const w = if (parked) window.desired.w else window.actual.w;
@@ -1792,8 +1830,8 @@ pub const Engine = struct {
                 text.print("frames_corrected={d} windows_auto_floated={d} windows_dropped={d}\n", .{
                     stats.frames_corrected, stats.windows_auto_floated, stats.windows_dropped,
                 });
-                text.print("focus_rejected={d} apps_suspended={d}\n", .{
-                    stats.focus_rejected, stats.apps_suspended,
+                text.print("focus_rejected={d} apps_suspended={d} frames_lifted={d}\n", .{
+                    stats.focus_rejected, stats.apps_suspended, stats.frames_lifted,
                 });
             },
         }

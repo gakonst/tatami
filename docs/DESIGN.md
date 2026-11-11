@@ -42,6 +42,8 @@ The rules that make it behave:
 | Title rules keep applying after a window appears | 3 s |
 | A window sent away by a rule may not pull focus back for | 1.5 s |
 | An unconfirmed focus request expires and focus is asked for again after | 500 ms |
+| A parked window that macOS lifts | the lift is remembered per window, never retried |
+| A hidden application that repeats the focus it already had | ignored |
 
 Focus is optimistic: a command updates the engine's idea of focus at once and the request to
 the OS is queued as pending. An echo confirms it. If the echo never comes, or the window is
@@ -64,7 +66,7 @@ Static, checked by assertions, and reported in `tatami query stats` when hit.
 
 | Protocol | Use |
 |---|---|
-| Accessibility (AXUIElement, AXObserver) | Per app: window created, focused window changed, main window changed. Per window: destroyed, moved, resized, title changed, miniaturized, deminiaturized. Frames are read and written through position and size; focus through main, raise and frontmost. |
+| Accessibility (AXUIElement, AXObserver) | Per app: window created, focused window changed, main window changed. Per window: destroyed, moved, resized, title changed, miniaturized, deminiaturized. Frames are read and written through position and size; focus through main, raise and frontmost. A frame whose size is already right is only moved, which is all a workspace switch needs. |
 | Accessibility messaging timeout | 250 ms for every call in the process. An app that hits it is suspended by the engine, so one hung app delays only its own windows. |
 | `AXEnhancedUserInterface` | Turned off around a frame change so apps driven by assistive software do not animate it. |
 | `_AXUIElementGetWindow` (private) | The window id. The only private call. |
@@ -72,6 +74,7 @@ Static, checked by assertions, and reported in `tatami query stats` when hit.
 | Carbon application events | Launched, terminated, front switched. |
 | Quartz display reconfiguration | Monitors added, removed, rearranged or asleep. Debounced. |
 | Mouse | The button state is polled every 30 ms only while a window is being dragged, to tell a drag in progress from a finished one. |
+| Secure Input (`IsSecureEventInputEnabled`) | Read at startup and by `tatami check`, with the process that holds it. While it is held, option-only hot keys cannot fire. |
 | Unix socket `/tmp/tatami-<uid>.sock` | One line in, one reply out. The client gives up after 2 s; the server reads with a 100 ms timeout. `exec` is refused over the socket. |
 | Signals | SIGINT and SIGTERM restore parked windows and quit. On a fatal signal the process replaces itself with `tatami rescue`. |
 
@@ -88,6 +91,8 @@ Faults it injects:
 - Windows that move themselves back.
 - Windows that animate and report frames on the way.
 - Titles that arrive late.
+- Windows that macOS lifts by 28, 32 or 40 pixels when they are parked below the screen
+  (seen live: the title bar must stay reachable).
 - Notifications that are late, duplicated, or about windows that are gone.
 
 After every quiet moment it asserts:

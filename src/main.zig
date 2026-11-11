@@ -130,6 +130,14 @@ fn check() c_int {
             monitor.display, if (monitor.main) " (main)" else "", v.x, v.y, v.w, v.h,
         });
     }
+    var holder_buffer: [256]u8 = undefined;
+    var holder_pid: i32 = 0;
+    if (ax.secure_input_holder(&holder_buffer, &holder_pid)) |holder| {
+        out("secure input: ON, held by {s} (pid {d})\n", .{ holder, holder_pid });
+        out("{s}", .{ax.secure_input_advice});
+    } else {
+        out("secure input: off\n", .{});
+    }
     out("manager: ", .{});
     const running = ipc.client("query stats") catch false;
     if (!running) out("not running\n", .{});
@@ -159,6 +167,13 @@ fn running_apps(apps: []RunningApp) usize {
     return count;
 }
 
+/// The id of the window an application names in one of its attributes, 0 when none.
+fn probe_window(app: c.Ref, attribute: c.Ref) u32 {
+    const window = ax.copy(app, attribute) catch return 0;
+    defer c.CFRelease(window);
+    return ax.window_id(window);
+}
+
 fn probe(titles: bool) c_int {
     if (!trusted_or_explain()) return 1;
     ax.init();
@@ -180,7 +195,14 @@ fn probe(titles: bool) c_int {
         };
         defer c.CFRelease(list);
         const count = c.CFArrayGetCount(list);
-        out("{s} (pid {d}): {d} windows\n", .{ app.name[0..app.name_len], app.pid, count });
+        out("{s} (pid {d}): {d} windows, focused={d} main={d} frontmost={}\n", .{
+            app.name[0..app.name_len],
+            app.pid,
+            count,
+            probe_window(element, ax.names.focused_window),
+            probe_window(element, ax.names.main_window),
+            ax.bool_get(element, ax.names.frontmost),
+        });
         var index: c.CFIndex = 0;
         while (index < count) : (index += 1) {
             const window = c.CFArrayGetValueAtIndex(list, index);
@@ -247,7 +269,7 @@ fn rescue() c_int {
             const h = @min(frame.h, home.h);
             const x = home.x + @divTrunc(home.w - w, 2);
             const y = home.y + @divTrunc(home.h - h, 2);
-            _ = ax.frame_set(window, .{ .x = x, .y = y, .w = w, .h = h }) catch continue;
+            _ = ax.frame_set(window, .{ .x = x, .y = y, .w = w, .h = h }, false) catch continue;
             moved += 1;
         }
     }

@@ -1,7 +1,15 @@
 # Trying and installing tatami
 
-tatami has not run against real windows yet. Try it by hand first, at the Mac, with the
-screen unlocked.
+tatami has run live on one Mac for one session. Try it by hand before making it the
+window manager that starts at login.
+
+## If option keys type characters
+
+Run `tatami check`. If it says Secure Input is on, macOS is withholding every hot key whose
+only modifiers are option and shift (option-f, option-1, option-shift-1) from every
+application, and the key types its character instead. It names the process that holds
+it. Leave the password field, or quit that application; when it is loginwindow, lock and
+unlock the screen. Hot keys with cmd or ctrl in them are not affected.
 
 ## Try it
 

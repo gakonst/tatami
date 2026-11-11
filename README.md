@@ -13,10 +13,25 @@ that answers it.
 | Part | State |
 |---|---|
 | Engine (layout, focus, workspaces, rules) | Verified by unit tests, scenario tests and a deterministic simulator |
-| macOS shell (Accessibility, hot keys, displays, IPC) | Starts, adopts apps, registers all hot keys, answers the CLI. **Not yet run against real windows.** |
+| macOS shell (Accessibility, hot keys, displays, IPC) | Run live on one Mac (macOS 26.3, one display, 4 windows). See below. |
 
-Do not replace your window manager with it before trying it by hand: see
-[docs/INSTALL.md](docs/INSTALL.md).
+Checked live, each against an independent Accessibility read of every window:
+
+- Discovery and tiling of the windows that were open, focus, swap, zoom-fullscreen.
+- Workspace switch and back (frames return exactly), send to workspace, an empty workspace
+  that stays empty.
+- Resizing a tile with the mouse.
+- Hot keys with cmd in them (focus, warp), pressed by hand.
+- `tatami quit`.
+
+Not checked live yet: hot keys that use only option or option-shift (Secure Input was on
+during the trial, see [docs/INSTALL.md](docs/INSTALL.md)), `tatami rescue` with windows
+actually parked, more than one display, native tabs, sticky windows, rules, applications
+that hang.
+
+Measured live, from the command line including process start: focus 15 to 55 ms, workspace
+switch 45 to 100 ms. Almost all of it is the applications answering Accessibility calls;
+the engine's share is microseconds (`tatami bench`).
 
 ## Design in one paragraph
 
@@ -41,7 +56,7 @@ Apple Silicon macOS only.
 ## Use
 
 ```sh
-tatami check            # permission, configuration, displays
+tatami check            # permission, configuration, displays, Secure Input
 tatami probe            # what Accessibility reports for every window, and how fast
 tatami start --verbose  # run in the foreground
 tatami focus west       # any command from the config also works from the CLI

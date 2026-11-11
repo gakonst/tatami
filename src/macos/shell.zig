@@ -146,10 +146,54 @@ fn dispatch(event: Event) void {
 }
 
 fn process(event: Event) void {
+    const started_us = c.now_us();
     const effects = engine.step(event, c.now_ms());
     const count = effects.len;
     @memcpy(performing[0..count], effects);
-    for (performing[0..count]) |effect| perform(effect);
+    if (verbose) trace_event(event);
+    for (performing[0..count]) |effect| {
+        const before_us = c.now_us();
+        perform(effect);
+        if (verbose) trace_effect(effect, c.now_us() - before_us);
+    }
+    if (verbose and count > 0) log("   {d} effects in {d} us", .{ count, c.now_us() - started_us });
+}
+
+/// One line per event for 'start --verbose'. Never prints window titles.
+fn trace_event(event: Event) void {
+    const at = c.now_ms() % 1_000_000;
+    const focus = engine.focused_window;
+    switch (event) {
+        .window_appeared => |e| log("{d} appeared {d} pid={d} [focus={d}]", .{
+            at, e.id, e.pid, focus,
+        }),
+        .window_destroyed => |id| log("{d} destroyed {d} [focus={d}]", .{ at, id, focus }),
+        .window_frame_applied => |e| log("{d} applied {d} {d},{d} {d}x{d}", .{
+            at, e.id, e.frame.x, e.frame.y, e.frame.w, e.frame.h,
+        }),
+        .window_frame_changed => |e| log("{d} changed {d} {d},{d} {d}x{d} user={}", .{
+            at, e.id, e.frame.x, e.frame.y, e.frame.w, e.frame.h, e.by_user,
+        }),
+        .window_focused => |id| log("{d} focused {d} [focus={d}]", .{ at, id, focus }),
+        .focus_reported => |id| log("{d} focus-report {d} [focus={d}]", .{ at, id, focus }),
+        .window_tab_changed => |e| log("{d} tab {d} of {d}", .{ at, e.id, e.tab_of }),
+        .app_launched => |e| log("{d} launched {d}", .{ at, e.pid }),
+        .app_terminated => |pid| log("{d} terminated {d}", .{ at, pid }),
+        .app_unresponsive => |pid| log("{d} unresponsive {d}", .{ at, pid }),
+        .command => |cmd| log("{d} command {s} [focus={d}]", .{ at, @tagName(cmd), focus }),
+        .tick => {},
+        else => log("{d} {s}", .{ at, @tagName(event) }),
+    }
+}
+
+fn trace_effect(effect: Effect, took_us: u64) void {
+    switch (effect) {
+        .set_frame => |e| log("   -> set {d} {d},{d} {d}x{d} ({d} us)", .{
+            e.id, e.frame.x, e.frame.y, e.frame.w, e.frame.h, took_us,
+        }),
+        .focus_window => |e| log("   -> focus {d} pid={d} ({d} us)", .{ e.id, e.pid, took_us }),
+        else => log("   -> {s} ({d} us)", .{ @tagName(effect), took_us }),
+    }
 }
 
 fn perform(effect: Effect) void {
@@ -187,7 +231,11 @@ fn perform_set_frame(id: u32, pid: i32, frame: Rect) void {
         if (enhanced) ax.bool_set(known.element, ax.names.enhanced_user_interface, false);
     }
     defer if (enhanced) ax.bool_set(app.?.element, ax.names.enhanced_user_interface, true);
-    const applied = ax.frame_set(window.element, frame) catch |err| {
+    const move_only = if (engine.window_find(id)) |known|
+        known.actual.w == frame.w and known.actual.h == frame.h
+    else
+        false;
+    const applied = ax.frame_set(window.element, frame, move_only) catch |err| {
         switch (err) {
             error.Unresponsive => followup_push(.{ .app_unresponsive = pid }),
             error.Invalid => {
@@ -783,6 +831,15 @@ fn quit_from_signal() void {
     dispatch(.{ .command = command.parse("quit", &pool) catch unreachable });
 }
 
+fn secure_input_warn() void {
+    var buffer: [256]u8 = undefined;
+    var pid: i32 = 0;
+    const holder = ax.secure_input_holder(&buffer, &pid) orelse return;
+    std.debug.print("tatami: Secure Input is ON, held by {s} (pid {d}).\n{s}", .{
+        holder, pid, ax.secure_input_advice,
+    });
+}
+
 /// Subscribes to hot keys, application launches and exits, and display changes.
 fn events_install() void {
     const hot_key_types = [_]c.EventTypeSpec{
@@ -849,9 +906,11 @@ pub fn run() noreturn {
 
     events_install();
     hot_keys_register();
+    secure_input_warn();
     ipc.server_open(ipc_request, quit_from_signal);
     _ = c.signal(2, @intFromPtr(&signal_quit)); // SIGINT
     _ = c.signal(15, @intFromPtr(&signal_quit)); // SIGTERM
+    _ = c.signal(1, @intFromPtr(&signal_quit)); // SIGHUP: the terminal that started us closed.
 
     std.debug.print(
         "tatami: managing {d} windows on {d} monitors\n",
