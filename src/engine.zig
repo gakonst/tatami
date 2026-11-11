@@ -1428,11 +1428,13 @@ pub const Engine = struct {
             .exec => |span| return engine.emit(.{ .exec = span }),
             .reload => return engine.emit(.reload),
             .quit => return engine.command_quit(),
+            // Binding modes live in the shell: they choose which hot keys are registered.
+            .mode => return,
             else => {},
         }
         if (engine.monitors_count == 0) return;
         switch (cmd) {
-            .query, .exec, .reload, .quit => unreachable,
+            .query, .exec, .reload, .mode, .quit => unreachable,
             .focus => |direction| engine.command_focus(direction),
             .swap => |direction| engine.command_swap(direction),
             .warp => |direction| engine.command_warp(direction),

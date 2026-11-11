@@ -72,6 +72,8 @@ var drag_poll_at_ms: u64 = 0;
 var monitors_dirty_at_ms: u64 = 0;
 var hot_keys: [config_module.bindings_max]Ref = undefined;
 var hot_keys_count: u32 = 0;
+/// The binding mode whose hot keys are registered. 0 is main.
+var mode_current: u8 = 0;
 var config_scratch: Config = undefined;
 var config_bytes: [config_bytes_max]u8 = undefined;
 var own_pid: i32 = 0;
@@ -647,14 +649,17 @@ fn hot_keys_register() void {
     }
     hot_keys_count = engine.config.bindings_count;
     var failed: u32 = 0;
+    var registered: u32 = 0;
     for (engine.config.bindings[0..hot_keys_count], 0..) |*binding, index| {
+        hot_keys[index] = null;
+        if (binding.mode != mode_current) continue;
+        registered += 1;
         var modifiers: u32 = 0;
         if (binding.modifiers.cmd) modifiers |= c.modifier_cmd;
         if (binding.modifiers.alt) modifiers |= c.modifier_option;
         if (binding.modifiers.ctrl) modifiers |= c.modifier_control;
         if (binding.modifiers.shift) modifiers |= c.modifier_shift;
         const id: c.EventHotKeyID = .{ .signature = c.fourcc("tata"), .id = @intCast(index) };
-        hot_keys[index] = null;
         const status = c.RegisterEventHotKey(
             binding.keycode,
             modifiers,
@@ -667,7 +672,9 @@ fn hot_keys_register() void {
     }
     // Never silently: a binding that did not register is a key that types a character.
     if (failed > 0) std.debug.print("tatami: {d} hot keys could not be registered\n", .{failed});
-    log("hot keys: {d} registered", .{hot_keys_count - failed});
+    log("hot keys: {d} registered in mode {s}", .{
+        registered - failed, engine.config.mode_name(mode_current),
+    });
 }
 
 fn hot_key_pressed(call: Ref, event: Ref, context: ?*anyopaque) callconv(.c) i32 {
@@ -688,8 +695,25 @@ fn hot_key_pressed(call: Ref, event: Ref, context: ?*anyopaque) callconv(.c) i32
     }
     // Copy: a reload command replaces the configuration under our feet.
     const binding = engine.config.bindings[id.id];
-    for (binding.commands[0..binding.commands_count]) |cmd| dispatch(.{ .command = cmd });
+    if (binding.mode != mode_current) return 0;
+    var mode_next: ?u8 = null;
+    for (binding.commands[0..binding.commands_count]) |cmd| {
+        switch (cmd) {
+            .mode => |span| mode_next = engine.config.mode_find(engine.config.strings.get(span)),
+            else => dispatch(.{ .command = cmd }),
+        }
+    }
+    // After the binding's commands, so hot keys are never re-registered under the handler
+    // of the one that fired, and "close-others ; mode main" still closes first.
+    if (mode_next) |mode| mode_enter(mode);
     return 0;
+}
+
+fn mode_enter(mode: u8) void {
+    assert(mode < engine.config.modes_count);
+    if (mode == mode_current) return;
+    mode_current = mode;
+    hot_keys_register();
 }
 
 // Timer: one run loop timer serves every deadline.
@@ -798,7 +822,10 @@ fn config_load(reload: bool) void {
     } else {
         return;
     }
-    if (reload) hot_keys_register();
+    if (reload) {
+        mode_current = 0;
+        hot_keys_register();
+    }
 }
 
 // Commands from the command line client.
@@ -811,6 +838,16 @@ fn ipc_request(text: []const u8, reply: *stdx.Text) void {
     };
     if (parsed == .exec) {
         reply.print("error: exec is only available in key bindings\n", .{});
+        return;
+    }
+    if (parsed == .mode) {
+        const name = pool.get(parsed.mode);
+        const mode = engine.config.mode_find(name) orelse {
+            reply.print("error: no mode named {s}\n", .{name});
+            return;
+        };
+        mode_enter(mode);
+        reply.print("ok\n", .{});
         return;
     }
     dispatch(.{ .command = parsed });

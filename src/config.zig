@@ -13,6 +13,9 @@ pub const bindings_max = 192;
 pub const rules_max = 64;
 pub const commands_per_binding_max = 4;
 pub const gap_max = 200;
+/// Binding modes, including main.
+pub const modes_max = 8;
+pub const mode_name_max = 16;
 
 pub const default_source = @embedFile("default.conf");
 
@@ -25,6 +28,8 @@ pub const Modifiers = packed struct(u8) {
 };
 
 pub const Binding = struct {
+    /// Index into Config.modes. 0 is main, the mode the manager starts in.
+    mode: u8,
     modifiers: Modifiers,
     /// macOS virtual key code (ANSI layout positions).
     keycode: u16,
@@ -106,6 +111,8 @@ const LineError = error{
     BadGap,
     BadRule,
     BadAction,
+    BadMode,
+    TooManyModes,
 } || command.ParseError;
 
 pub const Config = struct {
@@ -116,6 +123,8 @@ pub const Config = struct {
     bindings_count: u32,
     rules: [rules_max]Rule,
     rules_count: u32,
+    modes: [modes_max]Span,
+    modes_count: u8,
     strings: command.StringPool,
 
     pub fn init(config: *Config) void {
@@ -125,6 +134,60 @@ pub const Config = struct {
         config.bindings_count = 0;
         config.rules_count = 0;
         config.strings = .{};
+        config.modes[0] = config.strings.add("main") catch unreachable;
+        config.modes_count = 1;
+    }
+
+    pub fn mode_name(config: *const Config, mode: u8) []const u8 {
+        assert(mode < config.modes_count);
+        return config.strings.get(config.modes[mode]);
+    }
+
+    pub fn mode_find(config: *const Config, name: []const u8) ?u8 {
+        var mode: u8 = 0;
+        while (mode < config.modes_count) : (mode += 1) {
+            if (std.mem.eql(u8, config.mode_name(mode), name)) return mode;
+        }
+        return null;
+    }
+
+    fn mode_intern(config: *Config, name: []const u8) LineError!u8 {
+        if (name.len == 0 or name.len > mode_name_max) return error.BadMode;
+        if (config.mode_find(name)) |mode| return mode;
+        if (config.modes_count == modes_max) return error.TooManyModes;
+        config.modes[config.modes_count] = try config.strings.add(name);
+        config.modes_count += 1;
+        return config.modes_count - 1;
+    }
+
+    /// Every mode command names a mode that has bindings, and every mode but main has a
+    /// binding that leaves it, so no key press can strand the user in a mode.
+    fn modes_check(config: *const Config, diagnostics: *stdx.Text) bool {
+        var ok = true;
+        var exits: [modes_max]bool = @splat(false);
+        exits[0] = true;
+        for (config.bindings[0..config.bindings_count]) |*binding| {
+            for (binding.commands[0..binding.commands_count]) |cmd| {
+                if (cmd != .mode) continue;
+                const name = config.strings.get(cmd.mode);
+                const target = config.mode_find(name);
+                if (target == null) {
+                    ok = false;
+                    diagnostics.print("mode \"{s}\" has no bindings\n", .{name});
+                } else if (target.? != binding.mode) {
+                    exits[binding.mode] = true;
+                }
+            }
+        }
+        var mode: u8 = 1;
+        while (mode < config.modes_count) : (mode += 1) {
+            if (exits[mode]) continue;
+            ok = false;
+            diagnostics.print("mode \"{s}\" has no binding that leaves it\n", .{
+                config.mode_name(mode),
+            });
+        }
+        return ok;
     }
 
     /// Parses source into config. On failure config is left in an unspecified state, so
@@ -143,8 +206,10 @@ pub const Config = struct {
                 diagnostics.print("line {d}: {s}: {s}\n", .{ line_number, @errorName(err), line });
             };
         }
+        if (!config.modes_check(diagnostics)) ok = false;
         assert(config.bindings_count <= bindings_max);
         assert(config.rules_count <= rules_max);
+        assert(config.modes_count >= 1 and config.modes_count <= modes_max);
         return ok;
     }
 
@@ -183,14 +248,22 @@ pub const Config = struct {
     }
 
     fn load_binding(config: *Config, rest: []const u8) LineError!void {
-        const colon = std.mem.indexOfScalar(u8, rest, ':') orelse return error.MissingSeparator;
+        // The colon of a "mode:<name>" prefix is not the separator.
+        const from: usize = if (std.mem.startsWith(u8, rest, "mode:")) "mode:".len else 0;
+        const colon =
+            std.mem.indexOfScalarPos(u8, rest, from, ':') orelse return error.MissingSeparator;
         var binding: Binding = undefined;
         binding.commands_count = 0;
-        try parse_chord(command.trim(rest[0..colon]), &binding);
-        for (config.bindings[0..config.bindings_count]) |*other| {
-            const same_modifiers =
-                @as(u8, @bitCast(other.modifiers)) == @as(u8, @bitCast(binding.modifiers));
-            if (same_modifiers and other.keycode == binding.keycode) return error.DuplicateBinding;
+        binding.mode = 0;
+        var chord = command.trim(rest[0..colon]);
+        if (std.mem.startsWith(u8, chord, "mode:")) {
+            const space = std.mem.indexOfAny(u8, chord, " \t") orelse return error.BadMode;
+            binding.mode = try config.mode_intern(chord["mode:".len..space]);
+            chord = command.trim(chord[space..]);
+        }
+        try parse_chord(chord, &binding);
+        if (config.binding_find_in(binding.mode, binding.modifiers, binding.keycode) != null) {
+            return error.DuplicateBinding;
         }
         var parts = std.mem.splitScalar(u8, rest[colon + 1 ..], ';');
         while (parts.next()) |part| {
@@ -241,10 +314,20 @@ pub const Config = struct {
         config.rules_count += 1;
     }
 
+    /// A binding of the main mode.
     pub fn binding_find(config: *const Config, modifiers: Modifiers, keycode: u16) ?*const Binding {
+        return config.binding_find_in(0, modifiers, keycode);
+    }
+
+    pub fn binding_find_in(
+        config: *const Config,
+        mode: u8,
+        modifiers: Modifiers,
+        keycode: u16,
+    ) ?*const Binding {
         for (config.bindings[0..config.bindings_count]) |*binding| {
             const same = @as(u8, @bitCast(binding.modifiers)) == @as(u8, @bitCast(modifiers));
-            if (same and binding.keycode == keycode) return binding;
+            if (same and binding.mode == mode and binding.keycode == keycode) return binding;
         }
         return null;
     }
@@ -309,8 +392,15 @@ const testing = std.testing;
 test "the built-in configuration loads" {
     var config: Config = undefined;
     config.load_default();
-    try testing.expectEqual(@as(u32, 86), config.bindings_count);
-    try testing.expectEqual(@as(u32, 23), config.rules_count);
+    try testing.expectEqual(@as(u32, 91), config.bindings_count);
+    try testing.expectEqual(@as(u32, 25), config.rules_count);
+    const service = config.mode_find("service").?;
+    const enter = config.binding_find(.{ .alt = true, .shift = true }, 41).?;
+    try testing.expectEqualStrings("service", config.strings.get(enter.commands[0].mode));
+    const others = config.binding_find_in(service, .{}, 51).?;
+    try testing.expectEqual(Command.close_others, others.commands[0]);
+    try testing.expectEqualStrings("main", config.strings.get(others.commands[1].mode));
+    try testing.expect(config.binding_find(.{}, 51) == null);
     const focus = config.binding_find(.{ .cmd = true }, 4).?;
     try testing.expectEqual(Command{ .focus = .west }, focus.commands[0]);
     const float = config.binding_find(.{ .alt = true }, 17).?;
@@ -346,4 +436,38 @@ test "a bad file reports every bad line and loads nothing partially" {
     try testing.expect(std.mem.indexOf(u8, report, "line 7: BadAction") != null);
     try testing.expect(std.mem.indexOf(u8, report, "line 8") == null);
     try testing.expect(std.mem.indexOf(u8, report, "line 1:") == null);
+}
+
+test "binding modes: a chord may repeat across modes, and no mode can strand the user" {
+    var config: Config = undefined;
+    var buffer: [1024]u8 = undefined;
+    var diagnostics = stdx.Text.init(&buffer);
+    const good =
+        \\bind alt-r : mode resize
+        \\bind mode:resize h : resize left -20
+        \\bind mode:resize esc : mode main
+        \\bind mode:resize alt-r : mode main
+        \\bind esc : balance
+    ;
+    try testing.expect(config.load(good, &diagnostics));
+    const resize = config.mode_find("resize").?;
+    try testing.expectEqual(@as(u8, 1), resize);
+    try testing.expect(config.binding_find_in(resize, .{}, 53) != null);
+    try testing.expectEqual(Command.balance, config.binding_find(.{}, 53).?.commands[0]);
+
+    diagnostics = stdx.Text.init(&buffer);
+    const stranded =
+        \\bind alt-r : mode resize
+        \\bind mode:resize h : resize left -20
+        \\bind alt-q : mode nowhere
+        \\bind mode:resize h : balance
+        \\bind mode: h : balance
+    ;
+    try testing.expect(!config.load(stranded, &diagnostics));
+    const report = diagnostics.slice();
+    try testing.expect(std.mem.indexOf(u8, report, "line 4: DuplicateBinding") != null);
+    try testing.expect(std.mem.indexOf(u8, report, "line 5: BadMode") != null);
+    try testing.expect(std.mem.indexOf(u8, report, "mode \"nowhere\" has no bindings") != null);
+    const stuck = "\"resize\" has no binding that leaves";
+    try testing.expect(std.mem.indexOf(u8, report, stuck) != null);
 }

@@ -26,7 +26,7 @@ Checked live, each against an independent Accessibility read of every window:
 
 Not checked live yet: hot keys that use only option or option-shift (Secure Input was on
 during the trial, see [docs/INSTALL.md](docs/INSTALL.md)), `tatami rescue` with windows
-actually parked, more than one display, native tabs, sticky windows, rules, applications
+actually parked, binding modes, more than one display, native tabs, sticky windows, rules, applications
 that hang.
 
 Measured live, from the command line including process start: focus 15 to 55 ms, workspace
@@ -78,9 +78,14 @@ The configuration is one file, `~/.config/tatami/tatami.conf`. Without it the bu
 [src/default.conf](src/default.conf) applies: the yabai/skhd bindings, with option-N to
 switch workspace and option-shift-N to send a window there.
 
+Binding modes work as in AeroSpace: `bind mode:<name> <chord> : <command>` binds a key only
+while that mode is active, and `mode <name>` switches (also `tatami mode main` from the
+CLI). The default has AeroSpace's service mode on option-shift-; with esc, backspace
+(close the other windows), f (float) and r (retile). A mode with no binding that leaves it
+is rejected, so a key press can never strand you in one.
+
 ## What it does not do
 
-- No binding modes (AeroSpace's "service" mode). `retile` is on ctrl-alt-cmd-t.
 - No window borders, opacity, topmost or picture-in-picture: those need SIP disabled.
 - Hot keys do not repeat while held.
 - Workspaces are virtual: hidden windows are parked in a corner, as in AeroSpace. Native

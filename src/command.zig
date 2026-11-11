@@ -51,6 +51,8 @@ pub const Command = union(enum) {
     exec: Span,
     query: Query,
     reload,
+    /// Switch the active set of key bindings. The name is resolved by whoever runs it.
+    mode: Span,
     quit,
 };
 
@@ -200,6 +202,10 @@ pub fn parse(text: []const u8, pool: *StringPool) ParseError!Command {
     if (std.mem.eql(u8, name, "exec")) {
         if (words.rest.len == 0) return error.MissingArgument;
         return .{ .exec = try pool.add(words.rest) };
+    }
+    if (std.mem.eql(u8, name, "mode")) {
+        try expect_count(&words, 2);
+        return .{ .mode = try pool.add(words.items[1]) };
     }
     if (parse_directional(name, &words)) |result| return try result;
     if (parse_simple(name, &words)) |result| return try result;
@@ -362,6 +368,9 @@ test "parse rejects malformed commands" {
     var pool: StringPool = .{};
     try testing.expectError(error.Empty, parse("   ", &pool));
     try testing.expectError(error.UnknownCommand, parse("fly away", &pool));
+    const mode = try parse("mode service", &pool);
+    try testing.expectEqualStrings("service", pool.get(mode.mode));
+    try testing.expectError(error.MissingArgument, parse("mode", &pool));
     try testing.expectError(error.MissingArgument, parse("focus", &pool));
     try testing.expectError(error.BadArgument, parse("focus sideways", &pool));
     try testing.expectError(error.TooManyArguments, parse("balance now", &pool));
