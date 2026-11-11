@@ -77,9 +77,9 @@ pub fn secure_input_pid() i32 {
 
 pub const secure_input_advice =
     "Until it is released, keys bound with only option or option-shift type their\n" ++
-    "character instead of reaching tatami. When loginwindow holds it, locking and\n" ++
-    "unlocking the screen usually releases it; otherwise leave the password field or\n" ++
-    "quit the application that holds it.\n";
+    "character instead of reaching tatami. The process macOS names is not always the\n" ++
+    "one at fault: the name was seen to follow the frontmost application. Locking and\n" ++
+    "unlocking the screen usually releases a Secure Input that is stuck.\n";
 
 /// The name of the process that holds Secure Input, null when nobody does.
 pub fn secure_input_holder(buffer: []u8, pid: *i32) ?[]const u8 {

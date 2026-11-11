@@ -7,9 +7,11 @@ window manager that starts at login.
 
 Run `tatami check`. If it says Secure Input is on, macOS is withholding every hot key whose
 only modifiers are option and shift (option-f, option-1, option-shift-1) from every
-application, and the key types its character instead. It names the process that holds
-it. Leave the password field, or quit that application; when it is loginwindow, lock and
-unlock the screen. Hot keys with cmd or ctrl in them are not affected.
+application, and the key types its character instead. Locking and unlocking the screen
+usually releases a Secure Input that is stuck. The process `tatami check` names is what
+macOS reports, and was seen to follow the frontmost application, so it is not always the
+one at fault; `ioreg -l -w 0 | grep SecureInputPID` gave loginwindow at the same time. Hot
+keys with cmd or ctrl in them are not affected.
 
 ## Try it
 
