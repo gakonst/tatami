@@ -104,6 +104,19 @@ pub const AXObserverCallback = *const fn (
 ) callconv(.c) void;
 
 pub extern "c" fn AXIsProcessTrusted() Boolean;
+pub extern "c" fn AXIsProcessTrustedWithOptions(options: Ref) Boolean;
+pub extern "c" const kAXTrustedCheckOptionPrompt: Ref;
+pub extern "c" const kCFTypeDictionaryKeyCallBacks: u8;
+pub extern "c" const kCFTypeDictionaryValueCallBacks: u8;
+pub extern "c" fn CFDictionaryCreate(
+    allocator: Ref,
+    keys: [*]const Ref,
+    values: [*]const Ref,
+    count: CFIndex,
+    key_callbacks: *const u8,
+    value_callbacks: *const u8,
+) Ref;
+pub extern "c" fn usleep(microseconds: u32) c_int;
 pub extern "c" fn AXUIElementCreateApplication(pid: i32) Ref;
 pub extern "c" fn AXUIElementCreateSystemWide() Ref;
 pub extern "c" fn AXUIElementCopyAttributeValue(element: Ref, attribute: Ref, value: *Ref) AXError;

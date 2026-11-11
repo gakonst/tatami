@@ -36,13 +36,19 @@ pub export fn main(argc: c_int, argv: [*][*:0]u8) c_int {
     if (std.mem.eql(u8, first, "start")) {
         shell.verbose = count > 2 and std.mem.eql(u8, std.mem.span(argv[2]), "--verbose");
         crash_handlers_install();
+        shell.restart_argv = @ptrCast(argv);
         shell.run();
     }
     if (std.mem.eql(u8, first, "check")) return check();
     if (std.mem.eql(u8, first, "probe")) {
         return probe(count > 2 and std.mem.eql(u8, std.mem.span(argv[2]), "--titles"));
     }
-    if (std.mem.eql(u8, first, "rescue")) return rescue();
+    if (std.mem.eql(u8, first, "rescue")) {
+        // After a crash, report failure whatever was rescued: launchd then starts us again.
+        const after_crash = count > 2 and std.mem.eql(u8, std.mem.span(argv[2]), "--crashed");
+        const code = rescue();
+        return if (after_crash) 70 else code;
+    }
     if (std.mem.eql(u8, first, "bench")) return bench();
     if (std.mem.eql(u8, first, "default-config")) {
         _ = c.write(1, config_module.default_source.ptr, config_module.default_source.len);
@@ -101,7 +107,7 @@ fn crash_handlers_install() void {
 
 fn crashed(number: c_int) callconv(.c) void {
     _ = number;
-    const argv = [_]?[*:0]const u8{ @ptrCast(&executable_path), "rescue", null };
+    const argv = [_]?[*:0]const u8{ @ptrCast(&executable_path), "rescue", "--crashed", null };
     _ = c.execv(@ptrCast(&executable_path), &argv);
     c._exit(70);
 }

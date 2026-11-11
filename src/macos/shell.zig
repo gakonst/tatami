@@ -831,6 +831,42 @@ fn quit_from_signal() void {
     dispatch(.{ .command = command.parse("quit", &pool) catch unreachable });
 }
 
+/// What main was started with, to start over once the permission has been granted.
+pub var restart_argv: ?[*]const ?[*:0]const u8 = null;
+
+/// Asks for the Accessibility permission, once, and waits for it. Exiting instead would
+/// have launchd start us over and over, and the user would have nothing to click on.
+/// Once granted we start over as a fresh process, which is known to see the permission.
+fn accessibility_wait() void {
+    const keys = [_]Ref{c.kAXTrustedCheckOptionPrompt};
+    const values = [_]Ref{c.kCFBooleanTrue};
+    const options = c.CFDictionaryCreate(
+        null,
+        &keys,
+        &values,
+        keys.len,
+        &c.kCFTypeDictionaryKeyCallBacks,
+        &c.kCFTypeDictionaryValueCallBacks,
+    );
+    assert(options != null);
+    _ = c.AXIsProcessTrustedWithOptions(options);
+    c.CFRelease(options);
+    std.debug.print(
+        "tatami: waiting for the Accessibility permission. Grant it to tatami, or to the\n" ++
+            "program that starts it, in System Settings > Privacy & Security >\n" ++
+            "Accessibility.\n",
+        .{},
+    );
+    // Not bounded on purpose: this waits for a person.
+    while (c.AXIsProcessTrusted() == 0) _ = c.usleep(1_000_000);
+    std.debug.print("tatami: Accessibility granted\n", .{});
+    var path: [1024]u8 = undefined;
+    var size: u32 = path.len;
+    if (restart_argv) |argv| {
+        if (c._NSGetExecutablePath(&path, &size) == 0) _ = c.execv(@ptrCast(&path), argv);
+    }
+}
+
 fn secure_input_warn() void {
     var buffer: [256]u8 = undefined;
     var pid: i32 = 0;
@@ -873,15 +909,7 @@ pub fn run() noreturn {
     own_pid = getpid();
     for (&apps) |*app| app.* = .{};
     for (&windows) |*window| window.* = .{};
-    if (c.AXIsProcessTrusted() == 0) {
-        std.debug.print(
-            "tatami: no Accessibility permission. Grant it to the program that starts\n" ++
-                "tatami in System Settings > Privacy & Security > Accessibility, then start\n" ++
-                "it again.\n",
-            .{},
-        );
-        c.exit(1);
-    }
+    if (c.AXIsProcessTrusted() == 0) accessibility_wait();
     ax.init();
     _ = c.NSApplicationLoad();
     const application = c.send(c.objc_getClass("NSApplication"), "sharedApplication");

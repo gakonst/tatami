@@ -47,10 +47,27 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.nix-community.home.a
 The terminal that starts tatami needs Accessibility permission (System Settings > Privacy &
 Security > Accessibility).
 
+## Run at login
+
+```sh
+./scripts/install.sh      # build, copy to ~/.local/bin/tatami, load the launchd agent
+./scripts/uninstall.sh    # stop it, bring parked windows back, remove both
+```
+
+The first start asks for the Accessibility permission and waits; once tatami is allowed
+in System Settings > Privacy & Security > Accessibility it starts by itself. The log is
+`~/Library/Logs/tatami.log`.
+
+- After a crash launchd starts it again, once parked windows are back on screen. After
+  `tatami quit` it stays stopped until
+  `launchctl kickstart gui/$(id -u)/xyz.gakonst.tatami`.
+- The permission belongs to the exact binary. After installing a new build macOS may list
+  tatami as allowed and still refuse it: remove it from the list and allow it again.
+
 ## Run at login (home-manager)
 
-Not applied anywhere. Accessibility permission is tied to the binary's path, so install the
-binary at a path that does not change on every rebuild.
+The same agent as a home-manager module. Not applied anywhere. Install the binary at a
+path that does not change on every rebuild, for the reason above.
 
 ```nix
 { config, ... }:

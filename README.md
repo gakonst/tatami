@@ -53,6 +53,12 @@ exactly where the engine says it should be. See [docs/DESIGN.md](docs/DESIGN.md)
 
 Apple Silicon macOS only.
 
+## Install
+
+```sh
+./scripts/install.sh    # starts at login; see docs/INSTALL.md
+```
+
 ## Use
 
 ```sh
