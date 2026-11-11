@@ -134,7 +134,7 @@ fn check() c_int {
     var holder_pid: i32 = 0;
     if (ax.secure_input_holder(&holder_buffer, &holder_pid)) |holder| {
         out("secure input: ON, held by {s} (pid {d})\n", .{ holder, holder_pid });
-        out("{s}", .{ax.secure_input_advice});
+        out("{s}{s}", .{ ax.secure_input_effect, ax.secure_input_advice(holder) });
     } else {
         out("secure input: off\n", .{});
     }

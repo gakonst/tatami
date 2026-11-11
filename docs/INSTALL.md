@@ -5,13 +5,23 @@ window manager that starts at login.
 
 ## If option keys type characters
 
-Run `tatami check`. If it says Secure Input is on, macOS is withholding every hot key whose
-only modifiers are option and shift (option-f, option-1, option-shift-1) from every
-application, and the key types its character instead. Locking and unlocking the screen
-usually releases a Secure Input that is stuck. The process `tatami check` names is what
-macOS reports, and was seen to follow the frontmost application, so it is not always the
-one at fault; `ioreg -l -w 0 | grep SecureInputPID` gave loginwindow at the same time. Hot
-keys with cmd or ctrl in them are not affected.
+Run `tatami check`. If it says Secure Input is on, macOS is withholding every character key
+bound with only option or option-shift (option-f, option-1, option-shift-1) from every
+application, tatami and AeroSpace alike, and the key types its character instead. Keys
+bound with cmd or ctrl, and arrow keys, are not affected.
+
+When the holder is loginwindow, it is a macOS bug, seen on 26.3.1: at every lock screen
+loginwindow takes Secure Input eight to ten times and gives it back once, so it stays on
+for as long as loginwindow lives. Locking and unlocking again adds to it. Only logging out
+and in again, or restarting, clears it, and the next lock screen brings it back. The log
+shows it:
+
+```sh
+/usr/bin/log show --last 1h --predicate \
+  'process == "loginwindow" AND eventMessage CONTAINS "CGSSetSecureEventInput"'
+```
+
+When the holder is another application, leave its password field or quit it.
 
 ## Try it
 

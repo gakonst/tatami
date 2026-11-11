@@ -835,8 +835,8 @@ fn secure_input_warn() void {
     var buffer: [256]u8 = undefined;
     var pid: i32 = 0;
     const holder = ax.secure_input_holder(&buffer, &pid) orelse return;
-    std.debug.print("tatami: Secure Input is ON, held by {s} (pid {d}).\n{s}", .{
-        holder, pid, ax.secure_input_advice,
+    std.debug.print("tatami: Secure Input is ON, held by {s} (pid {d}).\n{s}{s}", .{
+        holder, pid, ax.secure_input_effect, ax.secure_input_advice(holder),
     });
 }
 

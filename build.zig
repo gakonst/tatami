@@ -12,7 +12,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     // System frameworks only. tatami has no dependencies.
-    for ([_][]const u8{ "CoreFoundation", "ApplicationServices", "Carbon", "AppKit" }) |framework| {
+    const frameworks = [_][]const u8{
+        "CoreFoundation", "ApplicationServices", "Carbon", "AppKit", "IOKit",
+    };
+    for (frameworks) |framework| {
         exe_module.linkFramework(framework, .{});
     }
     exe_module.linkSystemLibrary("objc", .{});

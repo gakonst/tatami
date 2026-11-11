@@ -57,17 +57,43 @@ fn name(text: [*:0]const u8) Ref {
 }
 
 /// The process that holds Secure Input, 0 when nobody does, -1 when it cannot be told.
-/// While it is held, macOS delivers no hot key whose only modifiers are option and shift:
-/// the key types its character instead. A loginwindow that never lets go after the screen
-/// was unlocked is the usual culprit.
+/// While it is held, macOS delivers no hot key that is a character key with only option
+/// and shift: the key types its character instead.
+///
+/// The holder is read from the I/O registry. The session dictionary also has a pid under
+/// the same name, but it was seen to follow the frontmost application, not the culprit.
 pub fn secure_input_pid() i32 {
     if (c.IsSecureEventInputEnabled() == 0) return 0;
+    const key = name("kCGSSessionSecureInputPID");
+    defer c.CFRelease(key);
+    const registry = secure_input_pid_registry(key);
+    if (registry > 0) return registry;
     const session = c.CGSessionCopyCurrentDictionary();
     if (session == null) return -1;
     defer c.CFRelease(session);
-    const key = name("kCGSSessionSecureInputPID");
-    defer c.CFRelease(key);
-    const number = c.CFDictionaryGetValue(session, key);
+    return number_pid(c.CFDictionaryGetValue(session, key));
+}
+
+fn secure_input_pid_registry(key: Ref) i32 {
+    const root = c.IORegistryGetRootEntry(0);
+    if (root == 0) return -1;
+    defer _ = c.IOObjectRelease(root);
+    const users_key = name("IOConsoleUsers");
+    defer c.CFRelease(users_key);
+    const users = c.IORegistryEntryCreateCFProperty(root, users_key, null, 0);
+    if (users == null) return -1;
+    defer c.CFRelease(users);
+    const count = c.CFArrayGetCount(users);
+    var index: c.CFIndex = 0;
+    while (index < count) : (index += 1) {
+        const user = c.CFArrayGetValueAtIndex(users, index);
+        const pid = number_pid(c.CFDictionaryGetValue(user, key));
+        if (pid > 0) return pid;
+    }
+    return -1;
+}
+
+fn number_pid(number: Ref) i32 {
     var pid: i32 = 0;
     if (number == null or c.CFNumberGetValue(number, c.number_type_sint32, &pid) == 0) {
         return -1;
@@ -75,11 +101,18 @@ pub fn secure_input_pid() i32 {
     return if (pid > 0) pid else -1;
 }
 
-pub const secure_input_advice =
-    "Until it is released, keys bound with only option or option-shift type their\n" ++
-    "character instead of reaching tatami. The process macOS names is not always the\n" ++
-    "one at fault: the name was seen to follow the frontmost application. Locking and\n" ++
-    "unlocking the screen usually releases a Secure Input that is stuck.\n";
+pub const secure_input_effect =
+    "While it is held, option-f, option-1 and every other character key bound with only\n" ++
+    "option or option-shift types its character instead of reaching tatami, or any other\n" ++
+    "application. Keys bound with cmd or ctrl, and arrow keys, still work.\n";
+
+pub const secure_input_loginwindow =
+    "This is a macOS bug: loginwindow takes Secure Input several times at the lock screen\n" ++
+    "and gives it back once. Only logging out and in again, or restarting, clears it.\n" ++
+    "Locking and unlocking again adds to it. Check that macOS is up to date.\n";
+
+pub const secure_input_other =
+    "Leave its password field, or quit it.\n";
 
 /// The name of the process that holds Secure Input, null when nobody does.
 pub fn secure_input_holder(buffer: []u8, pid: *i32) ?[]const u8 {
@@ -87,6 +120,12 @@ pub fn secure_input_holder(buffer: []u8, pid: *i32) ?[]const u8 {
     if (pid.* == 0) return null;
     const length = if (pid.* > 0) c.proc_name(pid.*, buffer.ptr, @intCast(buffer.len)) else 0;
     return if (length > 0) buffer[0..@intCast(length)] else "unknown";
+}
+
+/// What to do about it, which depends on who holds it.
+pub fn secure_input_advice(holder: []const u8) []const u8 {
+    const stuck = std.mem.eql(u8, holder, "loginwindow");
+    return if (stuck) secure_input_loginwindow else secure_input_other;
 }
 
 pub fn init() void {

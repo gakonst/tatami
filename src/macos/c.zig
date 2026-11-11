@@ -46,6 +46,14 @@ pub extern "c" fn CFBooleanGetValue(boolean: Ref) Boolean;
 pub extern "c" fn CFNumberGetValue(number: Ref, number_type: CFIndex, out: *anyopaque) Boolean;
 pub extern "c" fn CFDictionaryGetValue(dictionary: Ref, key: Ref) Ref;
 pub extern "c" fn CGSessionCopyCurrentDictionary() Ref;
+pub extern "c" fn IORegistryGetRootEntry(main_port: u32) u32;
+pub extern "c" fn IORegistryEntryCreateCFProperty(
+    entry: u32,
+    key: Ref,
+    allocator: Ref,
+    options: u32,
+) Ref;
+pub extern "c" fn IOObjectRelease(object: u32) c_int;
 pub extern "c" fn IsSecureEventInputEnabled() Boolean;
 pub extern "c" fn proc_name(pid: c_int, buffer: [*]u8, size: u32) c_int;
 pub extern "c" fn CFAbsoluteTimeGetCurrent() f64;
