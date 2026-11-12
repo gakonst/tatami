@@ -20,6 +20,7 @@ const config_module = @import("config.zig");
 const Rect = geometry.Rect;
 const Direction = geometry.Direction;
 const Command = command.Command;
+const WindowRef = command.WindowRef;
 const Config = config_module.Config;
 const NodeIndex = tree.NodeIndex;
 const node_none = tree.node_none;
@@ -132,6 +133,22 @@ pub const Effect = union(enum) {
 pub const Mode = enum { tiled, floating };
 pub const Zoom = enum { none, parent, fullscreen };
 
+/// What a step changed, for whoever follows 'tatami events'.
+pub const Note = union(enum) {
+    window_created: WindowId,
+    window_closed: WindowId,
+    /// The window that has focus now, or 0 when none has.
+    focus_changed: WindowId,
+    /// The workspace in use now, counting from one.
+    workspace_changed: u8,
+    /// Anything about the layout changed: the new revision.
+    view_changed: u64,
+    /// More happened in one step than fits: query again.
+    overflow,
+};
+
+pub const notes_max: u32 = 16;
+
 pub const Window = struct {
     id: WindowId = 0,
     pid: i32 = 0,
@@ -170,6 +187,8 @@ pub const Window = struct {
     sets_total: u32 = 0,
     /// How far above the parking spot macOS insists on keeping this window (see lifted).
     park_lift: i32 = 0,
+    /// A name given with the label command, to address the window in later commands.
+    label: command.Label = .{},
 
     pub fn title_slice(window: *const Window) []const u8 {
         return window.title[0..window.title_len];
@@ -216,7 +235,10 @@ pub const Workspace = struct {
     display: u32 = 0,
     last_focus: WindowId = 0,
     insert: ?Direction = null,
+    /// The share of the split that the next window gets, with insert. 0 is an even split.
+    insert_percent: u8 = 0,
     gaps_toggled: bool = false,
+    label: command.Label = .{},
 };
 
 pub const Monitor = struct {
@@ -269,6 +291,11 @@ pub const Engine = struct {
     effects_count: u32,
     reply_buffer: [reply_max]u8,
     reply_len: u32,
+    /// Counts the changes to the layout, so that a snapshot can be told from a newer one.
+    revision: u64,
+    view_hash: u64,
+    notes: [notes_max]Note,
+    notes_count: u32,
     stats: Stats,
 
     pub fn init(engine: *Engine, config: *const Config) void {
@@ -291,6 +318,9 @@ pub const Engine = struct {
         engine.now_ms = 0;
         engine.effects_count = 0;
         engine.reply_len = 0;
+        engine.revision = 0;
+        engine.view_hash = 0;
+        engine.notes_count = 0;
         engine.stats = .{};
     }
 
@@ -313,7 +343,10 @@ pub const Engine = struct {
         engine.now_ms = now_ms;
         engine.effects_count = 0;
         engine.reply_len = 0;
+        engine.notes_count = 0;
         if (engine.stopped) return engine.effects[0..0];
+        const focus_before = engine.focused_window;
+        const workspace_before = engine.workspace_current();
         engine.stats.events += 1;
         switch (event) {
             .monitors_changed => |list| engine.on_monitors_changed(list),
@@ -338,8 +371,69 @@ pub const Engine = struct {
             engine.focus_stale = false;
             engine.emit(.query_focus);
         }
+        engine.notes_derive(focus_before, workspace_before);
         engine.stats.effects += engine.effects_count;
         return engine.effects[0..engine.effects_count];
+    }
+
+    /// What the last step changed. Valid until the next call to step.
+    pub fn notes_slice(engine: *const Engine) []const Note {
+        return engine.notes[0..engine.notes_count];
+    }
+
+    fn note(engine: *Engine, entry: Note) void {
+        if (engine.notes_count == notes_max) return;
+        // The last slot is kept to say that more happened than fits.
+        const last = engine.notes_count == notes_max - 1;
+        engine.notes[engine.notes_count] = if (last) .overflow else entry;
+        engine.notes_count += 1;
+    }
+
+    fn notes_derive(engine: *Engine, focus_before: WindowId, workspace_before: u8) void {
+        const workspace = engine.workspace_current();
+        if (workspace != workspace_before) engine.note(.{ .workspace_changed = workspace + 1 });
+        if (engine.focused_window != focus_before) {
+            engine.note(.{ .focus_changed = engine.focused_window });
+        }
+        const hash = engine.view_hash_compute();
+        if (hash == engine.view_hash) return;
+        engine.view_hash = hash;
+        engine.revision += 1;
+        engine.note(.{ .view_changed = engine.revision });
+    }
+
+    fn hash_mix(hash: u64, word: u32) u64 {
+        return (hash ^ word) *% 0x100000001b3;
+    }
+
+    /// A hash of everything a query can show about the layout: which windows there are,
+    /// where they belong and where they are meant to be, the labels and the focus.
+    fn view_hash_compute(engine: *const Engine) u64 {
+        var hash: u64 = 0xcbf29ce484222325;
+        for (&engine.windows) |*window| {
+            if (window.id == 0) continue;
+            const frame = if (window.desired_valid) window.desired else Rect.zero;
+            const flags = @as(u32, @backingInt(window.mode)) |
+                @as(u32, @backingInt(window.zoom)) << 1 |
+                @as(u32, @intFromBool(window.sticky)) << 3 |
+                @as(u32, @intFromBool(window.minimized)) << 4 |
+                @as(u32, @intFromBool(window.fullscreen)) << 5 |
+                @as(u32, @intFromBool(window.ignored)) << 6;
+            const words = [_]u32{
+                window.id,         window.workspace,  flags,             window.tab_of,
+                @bitCast(frame.x), @bitCast(frame.y), @bitCast(frame.w), @bitCast(frame.h),
+            };
+            for (words) |word| hash = hash_mix(hash, word);
+            for (window.label.slice()) |byte| hash = hash_mix(hash, byte);
+        }
+        for (engine.monitors[0..engine.monitors_count]) |*monitor| {
+            hash = hash_mix(hash, monitor.workspace);
+        }
+        for (&engine.workspaces) |*workspace| {
+            for (workspace.label.slice()) |byte| hash = hash_mix(hash, byte);
+            hash = hash_mix(hash, 0xff);
+        }
+        return hash_mix(hash, engine.focused_window);
     }
 
     /// The earliest time at which a tick has work to do, if any.
@@ -491,7 +585,12 @@ pub const Engine = struct {
         }
         engine.sticky_follow();
         for (&engine.windows) |*window| {
-            if (window.id != 0) engine.float_rescue(window);
+            if (window.id == 0) continue;
+            engine.float_rescue(window);
+            // Where macOS lets a window be depends on the displays: a frame it refused
+            // before may be allowed now, so every window that is off its target is sent
+            // there again, even to the same target.
+            window.desired_valid = false;
         }
         // Which monitor has focus may have changed under us; ask instead of guessing.
         engine.focus_stale = true;
@@ -843,6 +942,7 @@ pub const Engine = struct {
         }
         engine.rules_apply(window, true);
         engine.membership_sync(window);
+        engine.note(.{ .window_created = info.id });
     }
 
     fn on_window_destroyed(engine: *Engine, id: WindowId) void {
@@ -874,6 +974,7 @@ pub const Engine = struct {
             next.zoom = window.zoom;
             next.sticky = window.sticky;
             next.float_rect = window.float_rect;
+            next.label = window.label;
             next.desired_valid = false;
             for (&engine.windows) |*other| {
                 if (other.id != 0 and other.tab_of == id) other.tab_of = next.id;
@@ -886,6 +987,7 @@ pub const Engine = struct {
         if (engine.os_focus == id) engine.os_focus = 0;
         engine.focus_pending_remove(id);
         window.* = .{};
+        engine.note(.{ .window_closed = id });
         if (heir) |next| engine.membership_sync(next);
         if (was_focused) {
             engine.focused_window = 0;
@@ -923,13 +1025,16 @@ pub const Engine = struct {
     fn tree_insert(engine: *Engine, window: *Window) void {
         const workspace = &engine.workspaces[window.workspace];
         const placement: tree.Placement = if (workspace.insert) |side| .{ .side = side } else .auto;
+        const percent = workspace.insert_percent;
         workspace.insert = null;
+        workspace.insert_percent = 0;
         if (workspace.root == node_none) {
             engine.forest.insert(&workspace.root, node_none, window.id, .auto);
             return;
         }
         const anchor = engine.insert_anchor(window.workspace);
         engine.forest.insert(&workspace.root, anchor, window.id, placement);
+        if (percent != 0) engine.forest.share_set(engine.forest.leaf_find(window.id), percent);
     }
 
     /// New windows split the focused window, else the last focused one, else the last leaf.
@@ -1424,7 +1529,7 @@ pub const Engine = struct {
 
     fn on_command(engine: *Engine, cmd: Command) void {
         switch (cmd) {
-            .query => |what| return engine.query(what),
+            .query => |request| return engine.query(request),
             .exec => |span| return engine.emit(.{ .exec = span }),
             .reload => return engine.emit(.reload),
             .quit => return engine.command_quit(),
@@ -1433,12 +1538,12 @@ pub const Engine = struct {
             else => {},
         }
         if (engine.monitors_count == 0) return;
+        if (engine.command_targeted(cmd)) return;
         switch (cmd) {
-            .query, .exec, .reload, .mode, .quit => unreachable,
             .focus => |direction| engine.command_focus(direction),
             .swap => |direction| engine.command_swap(direction),
             .warp => |direction| engine.command_warp(direction),
-            .insert => |direction| engine.workspaces[engine.workspace_current()].insert = direction,
+            .insert => |direction| engine.insert_set(direction, 0),
             .resize_edge => |resize| engine.command_resize(resize.edge, resize.delta),
             .resize_dimension => |resize| {
                 const edge: Direction = if (resize.dimension == .width) .east else .south;
@@ -1485,7 +1590,239 @@ pub const Engine = struct {
                 engine.emit(.{ .close_window = .{ .id = window.id, .pid = window.pid } });
             },
             .close_others => engine.command_close_others(),
+            else => unreachable,
         }
+    }
+
+    /// The commands that name the windows they act on, by id or by label, and the ones
+    /// that take options. Most of them are modelled on Rex's (see docs/REX.md).
+    fn command_targeted(engine: *Engine, cmd: Command) bool {
+        switch (cmd) {
+            .focus_wrap => |direction| engine.command_focus_wrap(direction),
+            .focus_cycle => |cycle| engine.command_focus_cycle(cycle.forward, cycle.wrap),
+            .focus_window => |ref| {
+                if (engine.window_resolve(ref)) |window| engine.window_focus(window);
+            },
+            .swap_windows => |pair| engine.command_swap_windows(pair.a, pair.b),
+            .move => |move| engine.command_move(move),
+            .insert_ratio => |insert| engine.insert_set(insert.direction, insert.percent),
+            .resize_ratio => |percent| {
+                const window = engine.focused() orelse return true;
+                if (!window.in_layout() or window.zoom != .none) return true;
+                engine.forest.share_set(engine.forest.leaf_find(window.id), percent);
+            },
+            .zoom => |zoom| engine.command_zoom(zoom.window, zoom.state),
+            .float => |float| engine.command_float(float.window, float.bounds),
+            .tile => |ref| {
+                const window = engine.window_resolve(ref) orelse return true;
+                if (!window.managed()) return true;
+                window.mode_by_user = true;
+                window.auto_floated = false;
+                engine.mode_set(window, .tiled);
+            },
+            .close_window => |ref| {
+                const window = engine.window_resolve(ref) orelse return true;
+                engine.emit(.{ .close_window = .{ .id = window.id, .pid = window.pid } });
+            },
+            .label => |named| {
+                if (engine.window_resolve(named.window)) |window| window.label = named.label;
+            },
+            .label_workspace => |label| {
+                engine.workspaces[engine.workspace_current()].label = label;
+            },
+            else => return false,
+        }
+        return true;
+    }
+
+    fn insert_set(engine: *Engine, direction: Direction, percent: u8) void {
+        const workspace = &engine.workspaces[engine.workspace_current()];
+        workspace.insert = direction;
+        workspace.insert_percent = percent;
+    }
+
+    /// Answers a command that could not be done. The words before the first colon are
+    /// what the command line turns into its exit status.
+    fn fail(engine: *Engine, comptime format: []const u8, args: anytype) void {
+        var text = stdx.Text.init(&engine.reply_buffer);
+        text.print("error: " ++ format ++ "\n", args);
+        engine.reply_len = text.len;
+    }
+
+    fn window_resolve(engine: *Engine, ref: command.WindowRef) ?*Window {
+        switch (ref) {
+            .focused => {
+                if (engine.focused()) |window| return window;
+                engine.fail("not-found: no window has focus", .{});
+            },
+            .id => |id| {
+                if (engine.window_find(id)) |window| return window;
+                engine.fail("not-found: no window {d}", .{id});
+            },
+            .label => |label| {
+                var found: ?*Window = null;
+                var count: u32 = 0;
+                for (&engine.windows) |*window| {
+                    if (window.id == 0 or window.label.len == 0) continue;
+                    if (!stdx.eql_ignore_case(window.label.slice(), label.slice())) continue;
+                    found = window;
+                    count += 1;
+                }
+                if (count == 1) return found;
+                if (count == 0) {
+                    engine.fail("not-found: no window is labelled {s}", .{label.slice()});
+                } else {
+                    const name = label.slice();
+                    engine.fail("ambiguous: {d} windows are labelled {s}", .{ count, name });
+                }
+            },
+        }
+        return null;
+    }
+
+    /// Focuses a window wherever it is, showing its workspace first if it is hidden.
+    fn window_focus(engine: *Engine, window: *Window) void {
+        if (!window.focusable()) {
+            return engine.fail("conflict: window {d} cannot take focus", .{window.id});
+        }
+        if (engine.workspace_visible(window.workspace)) return engine.focus_request(window);
+        engine.workspaces[window.workspace].last_focus = window.id;
+        engine.workspace_focus(window.workspace);
+    }
+
+    /// With nothing that way, focus goes around to the far end of the other side.
+    fn command_focus_wrap(engine: *Engine, direction: Direction) void {
+        const window = engine.focused() orelse return engine.command_focus(direction);
+        const from = engine.workspace_monitor(window.workspace);
+        const onward = engine.neighbor(window, direction, false) != null or
+            engine.monitor_neighbor(from, direction) != null;
+        if (onward) return engine.command_focus(direction);
+        var target = window;
+        var steps: u32 = 0;
+        while (engine.neighbor(target, direction.opposite(), false)) |next| : (steps += 1) {
+            if (steps == windows_max) break;
+            target = next;
+        }
+        if (target != window) engine.focus_request(target);
+    }
+
+    /// The windows of a workspace that can take focus, in layout order: the tiles, each
+    /// split's first half before its second, and then the floating windows.
+    fn layout_order(engine: *Engine, workspace: u8, order: *[windows_max]WindowId) u32 {
+        var count: u32 = 0;
+        const root = engine.workspaces[workspace].root;
+        var leaf = engine.forest.leaf_first(root);
+        while (leaf != node_none) : (leaf = engine.forest.leaf_next(root, leaf)) {
+            assert(count < windows_max);
+            order[count] = engine.forest.nodes[leaf].window;
+            count += 1;
+        }
+        for (&engine.windows) |*window| {
+            if (window.id == 0 or window.workspace != workspace) continue;
+            if (window.in_layout() or !window.focusable() or window.fullscreen) continue;
+            assert(count < windows_max);
+            order[count] = window.id;
+            count += 1;
+        }
+        return count;
+    }
+
+    fn command_focus_cycle(engine: *Engine, forward: bool, wrap: bool) void {
+        var order: [windows_max]WindowId = undefined;
+        const count = engine.layout_order(engine.workspace_current(), &order);
+        if (count == 0) return;
+        var at: u32 = 0;
+        while (at < count and order[at] != engine.focused_window) at += 1;
+        var target: u32 = if (forward) 0 else count - 1;
+        if (at < count) {
+            const edge = if (forward) at + 1 == count else at == 0;
+            if (edge and !wrap) return;
+            if (!edge) target = if (forward) at + 1 else at - 1;
+        }
+        engine.focus_request(engine.window_find(order[target]).?);
+    }
+
+    /// Only the two windows trade places; every split and its size stays as it is.
+    fn command_swap_windows(engine: *Engine, one: WindowRef, other: WindowRef) void {
+        const a = engine.window_resolve(one) orelse return;
+        const b = engine.window_resolve(other) orelse return;
+        if (a == b) return engine.fail("bad-request: a window cannot swap with itself", .{});
+        if (!a.in_layout() or !b.in_layout()) {
+            return engine.fail("conflict: both windows must be tiled", .{});
+        }
+        if (a.workspace != b.workspace) {
+            return engine.fail("conflict: the windows are on different workspaces", .{});
+        }
+        const forest = &engine.forest;
+        forest.swap_windows(forest.leaf_find(a.id), forest.leaf_find(b.id));
+    }
+
+    /// Puts a window in a new split beside another one, on whichever workspace that is.
+    /// Focus follows the window if it had it.
+    fn command_move(engine: *Engine, move: command.MoveBeside) void {
+        const window = engine.window_resolve(move.window) orelse return;
+        const anchor = engine.window_resolve(move.anchor) orelse return;
+        if (window == anchor) {
+            return engine.fail("bad-request: a window cannot be put beside itself", .{});
+        }
+        if (!anchor.in_layout()) return engine.fail("conflict: the anchor must be tiled", .{});
+        if (!window.managed()) {
+            return engine.fail("conflict: window {d} cannot be tiled", .{window.id});
+        }
+        if (window.workspace != anchor.workspace) {
+            engine.window_send(window, anchor.workspace, engine.focused_window == window.id);
+        }
+        if (window.mode != .tiled) {
+            window.mode_by_user = true;
+            window.auto_floated = false;
+            engine.mode_set(window, .tiled);
+        }
+        assert(window.in_layout());
+        assert(window.workspace == anchor.workspace);
+        const forest = &engine.forest;
+        const workspace = &engine.workspaces[window.workspace];
+        forest.remove(&workspace.root, window.id);
+        const beside = forest.leaf_find(anchor.id);
+        forest.insert(&workspace.root, beside, window.id, .{ .side = move.side });
+        forest.share_set(forest.leaf_find(window.id), move.percent);
+        window.zoom = .none;
+        anchor.zoom = .none;
+    }
+
+    /// Zoom fills the workspace with one window and leaves the layout as it is.
+    fn command_zoom(engine: *Engine, ref: command.WindowRef, state: command.Switch) void {
+        const window = engine.window_resolve(ref) orelse return;
+        if (!window.managed()) {
+            return engine.fail("conflict: window {d} cannot be zoomed", .{window.id});
+        }
+        if (window.id != engine.focused_window) engine.window_focus(window);
+        const zoomed = switch (state) {
+            .toggle => window.zoom != .fullscreen,
+            .on => true,
+            .off => false,
+        };
+        window.zoom = if (zoomed) .fullscreen else .none;
+    }
+
+    /// Takes a window out of the layout, to where it is or to the bounds given as
+    /// thousandths of the workspace.
+    fn command_float(engine: *Engine, ref: command.WindowRef, bounds: ?command.Bounds) void {
+        const window = engine.window_resolve(ref) orelse return;
+        if (!window.managed()) {
+            return engine.fail("conflict: window {d} cannot be floated", .{window.id});
+        }
+        window.mode_by_user = true;
+        window.auto_floated = false;
+        engine.mode_set(window, .floating);
+        const part = bounds orelse return;
+        const area = engine.workspace_rect(engine.workspace_monitor(window.workspace));
+        window.zoom = .none;
+        window.float_rect = Rect.init(
+            area.x + @divTrunc(area.w * part.x, 1000),
+            area.y + @divTrunc(area.h * part.y, 1000),
+            @max(1, @divTrunc(area.w * part.w, 1000)),
+            @max(1, @divTrunc(area.h * part.h, 1000)),
+        );
     }
 
     fn edge_distance(origin: Rect, rect: Rect, direction: Direction) i32 {
@@ -1671,6 +2008,7 @@ pub const Engine = struct {
         }
         engine.forest.clear(&workspace.root);
         workspace.insert = null;
+        workspace.insert_percent = 0;
         for (order[0..count]) |id| {
             engine.window_find(id).?.zoom = .none;
             const anchor = engine.forest.leaf_last(workspace.root);
@@ -1788,6 +2126,14 @@ pub const Engine = struct {
         const current = engine.workspace_current();
         switch (target) {
             .index => |number| return if (number <= workspaces_max) number - 1 else null,
+            .label => |label| {
+                for (&engine.workspaces, 0..) |*workspace, index| {
+                    const same = stdx.eql_ignore_case(workspace.label.slice(), label.slice());
+                    if (same) return @intCast(index);
+                }
+                engine.fail("not-found: no workspace is labelled {s}", .{label.slice()});
+                return null;
+            },
             .recent => {
                 const recent = engine.recent_workspace;
                 return if (recent != current) recent else null;
@@ -1826,92 +2172,343 @@ pub const Engine = struct {
                 const recent = engine.recent_monitor;
                 return if (recent != current and recent < count) recent else null;
             },
-            .new => return null,
+            .new, .label => return null,
         }
     }
 
     // Queries.
 
-    fn query(engine: *Engine, what: command.Query) void {
+    fn query(engine: *Engine, request: command.QueryRequest) void {
         var text = stdx.Text.init(&engine.reply_buffer);
-        switch (what) {
-            .windows => engine.query_windows(&text),
-            .workspaces => engine.query_workspaces(&text),
-            .monitors => {
-                for (engine.monitors[0..engine.monitors_count], 0..) |*monitor, index| {
-                    const mark: u8 = if (index == engine.focused_monitor) '*' else ' ';
-                    const frame = monitor.visible;
-                    text.print("{c}{d}\tdisplay={d}\t{d},{d} {d}x{d}\tworkspace={d}\n", .{
-                        mark,    index + 1,             monitor.display, frame.x, frame.y, frame.w,
-                        frame.h, monitor.workspace + 1,
-                    });
+        const json = request.json;
+        switch (request.what) {
+            .windows => engine.query_windows(&text, json),
+            .workspaces => engine.query_workspaces(&text, json),
+            .monitors => engine.query_monitors(&text, json),
+            .focus => engine.query_focus(&text, json),
+            .stats => engine.query_stats(&text, json),
+            .window => {
+                const window = engine.window_resolve(request.window) orelse return;
+                if (json) {
+                    engine.window_json(&text, window);
+                    text.append("\n");
+                } else {
+                    engine.window_describe(&text, window);
                 }
             },
-            .focus => {
-                if (engine.focused()) |window| {
-                    const app = &engine.apps[window.app];
-                    text.print(
-                        "{d}\t{s}\t{s}\n",
-                        .{ window.id, app.name_slice(), window.title_slice() },
-                    );
-                }
-            },
-            .stats => {
-                const stats = &engine.stats;
-                text.print("events={d} effects={d} frames_set={d} frames_retried={d}\n", .{
-                    stats.events, stats.effects, stats.frames_set, stats.frames_retried,
-                });
-                text.print("frames_corrected={d} windows_auto_floated={d} windows_dropped={d}\n", .{
-                    stats.frames_corrected, stats.windows_auto_floated, stats.windows_dropped,
-                });
-                text.print("focus_rejected={d} apps_suspended={d} frames_lifted={d}\n", .{
-                    stats.focus_rejected, stats.apps_suspended, stats.frames_lifted,
-                });
-            },
+            .tree => engine.query_tree(&text, json),
+            .bindings => engine.config.bindings_print(&text, json),
+            .modes => engine.config.modes_print(&text, json, null),
+            .commands => command.reference_print(&text, json),
+        }
+        if (text.truncated) {
+            return engine.fail("too-large: the answer does not fit in {d} bytes", .{reply_max});
         }
         engine.reply_len = text.len;
     }
 
-    fn query_windows(engine: *Engine, text: *stdx.Text) void {
+    fn bool_name(value: bool) []const u8 {
+        return if (value) "true" else "false";
+    }
+
+    fn window_mode_name(window: *const Window) []const u8 {
+        if (window.tab_of != 0) return "tab";
+        if (window.ignored) return "ignored";
+        if (window.sticky) return "sticky";
+        if (window.auto_floated) return "auto-floated";
+        return @tagName(window.mode);
+    }
+
+    fn query_windows(engine: *Engine, text: *stdx.Text, json: bool) void {
+        if (json) text.append("{\"windows\":[");
+        var count: u32 = 0;
         for (&engine.windows) |*window| {
             if (window.id == 0) continue;
-            const mark: u8 = if (window.id == engine.focused_window) '*' else ' ';
-            const mode = if (window.tab_of != 0)
-                "tab"
-            else if (window.ignored)
-                "ignored"
-            else if (window.sticky)
-                "sticky"
-            else if (window.auto_floated)
-                "auto-floated"
-            else
-                @tagName(window.mode);
-            const frame = window.actual;
-            text.print("{c}{d}\tws={d}\t{s}\t{d},{d} {d}x{d}\t{s}\t{s}\n", .{
-                mark,                                 window.id,
-                window.workspace + 1,                 mode,
-                frame.x,                              frame.y,
-                frame.w,                              frame.h,
-                engine.apps[window.app].name_slice(), window.title_slice(),
+            if (json) {
+                if (count > 0) text.append(",");
+                engine.window_json(text, window);
+            } else {
+                engine.window_line(text, window);
+            }
+            count += 1;
+        }
+        if (json) text.append("]}\n");
+    }
+
+    /// Columns: id (starred when focused), workspace, mode, frame, label, application, title.
+    fn window_line(engine: *Engine, text: *stdx.Text, window: *const Window) void {
+        const mark: u8 = if (window.id == engine.focused_window) '*' else ' ';
+        const frame = window.actual;
+        const label = if (window.label.len > 0) window.label.slice() else "-";
+        text.print("{c}{d}\tws={d}\t{s}\t{d},{d} {d}x{d}\t{s}\t{s}\t{s}\n", .{
+            mark,                 window.id,
+            window.workspace + 1, window_mode_name(window),
+            frame.x,              frame.y,
+            frame.w,              frame.h,
+            label,                engine.apps[window.app].name_slice(),
+            window.title_slice(),
+        });
+    }
+
+    fn window_json(engine: *Engine, text: *stdx.Text, window: *const Window) void {
+        const app = &engine.apps[window.app];
+        const frame = window.actual;
+        const is_focused = window.id == engine.focused_window;
+        text.print("{{\"id\":{d},\"focused\":{s},\"workspace\":{d}", .{
+            window.id, bool_name(is_focused), window.workspace + 1,
+        });
+        text.print(",\"mode\":\"{s}\",\"zoom\":\"{s}\"", .{
+            window_mode_name(window), @tagName(window.zoom),
+        });
+        text.print(",\"frame\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}", .{
+            frame.x, frame.y, frame.w, frame.h,
+        });
+        text.print(",\"pid\":{d},\"tab_of\":{d},\"minimized\":{s},\"fullscreen\":{s}", .{
+            window.pid, window.tab_of, bool_name(window.minimized), bool_name(window.fullscreen),
+        });
+        text.append(",\"label\":");
+        text.json_string(window.label.slice());
+        text.append(",\"app\":");
+        text.json_string(app.name_slice());
+        text.append(",\"bundle\":");
+        text.json_string(app.bundle_slice());
+        text.append(",\"title\":");
+        text.json_string(window.title_slice());
+        text.append("}");
+    }
+
+    /// Everything about one window, one field per line.
+    fn window_describe(engine: *Engine, text: *stdx.Text, window: *const Window) void {
+        const app = &engine.apps[window.app];
+        const frame = window.actual;
+        const is_focused = window.id == engine.focused_window;
+        text.print("id={d}\nlabel={s}\nfocused={s}\n", .{
+            window.id, window.label.slice(), bool_name(is_focused),
+        });
+        text.print("workspace={d}\nmode={s}\nzoom={s}\n", .{
+            window.workspace + 1, window_mode_name(window), @tagName(window.zoom),
+        });
+        text.print("frame={d},{d} {d}x{d}\n", .{ frame.x, frame.y, frame.w, frame.h });
+        text.print("minimized={s}\nfullscreen={s}\ntab_of={d}\npid={d}\n", .{
+            bool_name(window.minimized), bool_name(window.fullscreen), window.tab_of, window.pid,
+        });
+        text.print("app={s}\nbundle={s}\ntitle={s}\n", .{
+            app.name_slice(), app.bundle_slice(), window.title_slice(),
+        });
+    }
+
+    fn workspace_windows(engine: *const Engine, workspace: u8) u32 {
+        var count: u32 = 0;
+        for (&engine.windows) |*window| {
+            if (window.id != 0 and window.workspace == workspace) count += 1;
+        }
+        return count;
+    }
+
+    /// Workspaces that are shown, hold windows or carry a label.
+    fn workspace_listed(engine: *const Engine, workspace: u8) bool {
+        if (engine.workspace_visible(workspace)) return true;
+        if (engine.workspaces[workspace].label.len > 0) return true;
+        return engine.workspace_windows(workspace) > 0;
+    }
+
+    fn query_workspaces(engine: *Engine, text: *stdx.Text, json: bool) void {
+        if (json) text.append("{\"workspaces\":[");
+        var listed: u32 = 0;
+        var workspace: u8 = 0;
+        while (workspace < workspaces_max) : (workspace += 1) {
+            if (!engine.workspace_listed(workspace)) continue;
+            const count = engine.workspace_windows(workspace);
+            const visible = engine.workspace_visible(workspace);
+            const current = workspace == engine.workspace_current();
+            const label = engine.workspaces[workspace].label.slice();
+            const monitor =
+                if (engine.monitors_count > 0) engine.workspace_monitor(workspace) + 1 else 0;
+            if (json) {
+                if (listed > 0) text.append(",");
+                text.print("{{\"index\":{d},\"focused\":{s},\"visible\":{s},\"monitor\":{d}", .{
+                    workspace + 1, bool_name(current), bool_name(visible), monitor,
+                });
+                text.print(",\"windows\":{d},\"label\":", .{count});
+                text.json_string(label);
+                text.append("}");
+            } else {
+                const mark: u8 = if (current) '*' else ' ';
+                const shown = if (visible) "visible" else "hidden";
+                const name = if (label.len > 0) label else "-";
+                text.print("{c}{d}\tmonitor={d}\t{s}\twindows={d}\t{s}\n", .{
+                    mark, workspace + 1, monitor, shown, count, name,
+                });
+            }
+            listed += 1;
+        }
+        if (json) text.append("]}\n");
+    }
+
+    fn query_monitors(engine: *Engine, text: *stdx.Text, json: bool) void {
+        if (json) text.append("{\"monitors\":[");
+        for (engine.monitors[0..engine.monitors_count], 0..) |*monitor, index| {
+            const current = index == engine.focused_monitor;
+            const frame = monitor.visible;
+            if (json) {
+                if (index > 0) text.append(",");
+                text.print("{{\"index\":{d},\"focused\":{s},\"display\":{d},\"workspace\":{d}", .{
+                    index + 1, bool_name(current), monitor.display, monitor.workspace + 1,
+                });
+                text.print(",\"frame\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d}}}}}", .{
+                    frame.x, frame.y, frame.w, frame.h,
+                });
+            } else {
+                const mark: u8 = if (current) '*' else ' ';
+                text.print("{c}{d}\tdisplay={d}\t{d},{d} {d}x{d}\tworkspace={d}\n", .{
+                    mark,    index + 1,             monitor.display, frame.x, frame.y, frame.w,
+                    frame.h, monitor.workspace + 1,
+                });
+            }
+        }
+        if (json) text.append("]}\n");
+    }
+
+    fn query_focus(engine: *Engine, text: *stdx.Text, json: bool) void {
+        const window = engine.focused() orelse {
+            if (json) {
+                const workspace = @as(u32, engine.workspace_current()) + 1;
+                text.print("{{\"window\":null,\"workspace\":{d}}}\n", .{workspace});
+            }
+            return;
+        };
+        const app = &engine.apps[window.app];
+        if (!json) {
+            text.print("{d}\t{s}\t{s}\n", .{ window.id, app.name_slice(), window.title_slice() });
+            return;
+        }
+        text.print("{{\"window\":{d},\"workspace\":{d}", .{ window.id, window.workspace + 1 });
+        text.append(",\"app\":");
+        text.json_string(app.name_slice());
+        text.append(",\"title\":");
+        text.json_string(window.title_slice());
+        text.append("}\n");
+    }
+
+    fn query_stats(engine: *Engine, text: *stdx.Text, json: bool) void {
+        const stats = &engine.stats;
+        if (json) {
+            text.append("{");
+            inline for (@typeInfo(Stats).@"struct".field_names) |name| {
+                text.print("\"{s}\":{d},", .{ name, @field(stats, name) });
+            }
+            text.print("\"revision\":{d}}}\n", .{engine.revision});
+            return;
+        }
+        text.print("events={d} effects={d} frames_set={d} frames_retried={d}\n", .{
+            stats.events, stats.effects, stats.frames_set, stats.frames_retried,
+        });
+        text.print("frames_corrected={d} windows_auto_floated={d} windows_dropped={d}\n", .{
+            stats.frames_corrected, stats.windows_auto_floated, stats.windows_dropped,
+        });
+        text.print("focus_rejected={d} apps_suspended={d} frames_lifted={d}\n", .{
+            stats.focus_rejected, stats.apps_suspended, stats.frames_lifted,
+        });
+    }
+
+    /// The layout of every workspace in use: its splits, their shares and the windows in
+    /// them, with the revision that tells this snapshot from a newer one.
+    fn query_tree(engine: *Engine, text: *stdx.Text, json: bool) void {
+        if (json) {
+            text.print("{{\"revision\":{d},\"focused\":{d},\"workspaces\":[", .{
+                engine.revision, engine.focused_window,
             });
+        } else {
+            text.print("revision={d}\n", .{engine.revision});
+        }
+        var listed: u32 = 0;
+        var workspace: u8 = 0;
+        while (workspace < workspaces_max) : (workspace += 1) {
+            if (!engine.workspace_listed(workspace)) continue;
+            if (json) {
+                if (listed > 0) text.append(",");
+                engine.tree_json(text, workspace);
+            } else {
+                engine.tree_lines(text, workspace);
+            }
+            listed += 1;
+        }
+        if (json) text.append("]}\n");
+    }
+
+    fn floating_in(window: *const Window, workspace: u8) bool {
+        if (window.id == 0 or window.workspace != workspace) return false;
+        return window.mode == .floating and window.managed();
+    }
+
+    fn tree_lines(engine: *Engine, text: *stdx.Text, workspace: u8) void {
+        const forest = &engine.forest;
+        const root = engine.workspaces[workspace].root;
+        const visible = engine.workspace_visible(workspace);
+        text.print("workspace {d} {s}\n", .{ workspace + 1, if (visible) "visible" else "hidden" });
+        var index = root;
+        var steps: u32 = 0;
+        while (index != node_none) : (index = forest.next(root, index)) {
+            assert(steps < tree.nodes_max);
+            steps += 1;
+            var up = index;
+            text.append("  ");
+            while (up != root) : (up = forest.nodes[up].parent) text.append("  ");
+            const node = &forest.nodes[index];
+            if (forest.is_leaf(index)) {
+                text.print("window {d}\n", .{node.window});
+            } else {
+                const percent = (node.ratio * 100 + tree.ratio_half) / tree.ratio_unit;
+                text.print("{s} {d}%\n", .{ @tagName(node.split), percent });
+            }
+        }
+        for (&engine.windows) |*window| {
+            if (floating_in(window, workspace)) text.print("  floating {d}\n", .{window.id});
         }
     }
 
-    fn query_workspaces(engine: *Engine, text: *stdx.Text) void {
-        var workspace: u8 = 0;
-        while (workspace < workspaces_max) : (workspace += 1) {
-            var count: u32 = 0;
-            for (&engine.windows) |*window| {
-                if (window.id != 0 and window.workspace == workspace) count += 1;
+    fn tree_json(engine: *Engine, text: *stdx.Text, workspace: u8) void {
+        const visible = engine.workspace_visible(workspace);
+        text.print("{{\"index\":{d},\"visible\":{s}", .{ workspace + 1, bool_name(visible) });
+        text.append(",\"label\":");
+        text.json_string(engine.workspaces[workspace].label.slice());
+        text.append(",\"layout\":");
+        engine.layout_json(text, engine.workspaces[workspace].root);
+        text.append(",\"floating\":[");
+        var count: u32 = 0;
+        for (&engine.windows) |*window| {
+            if (!floating_in(window, workspace)) continue;
+            text.print("{s}{d}", .{ if (count > 0) "," else "", window.id });
+            count += 1;
+        }
+        text.append("]}");
+    }
+
+    /// A split is {"split","ratio","first","second"}, a tile is {"window"}. Written in
+    /// tree order without recursion: after a tile, close every split it completes.
+    fn layout_json(engine: *Engine, text: *stdx.Text, root: NodeIndex) void {
+        if (root == node_none) return text.append("null");
+        const forest = &engine.forest;
+        var index = root;
+        var steps: u32 = 0;
+        while (index != node_none) : (index = forest.next(root, index)) {
+            assert(steps < tree.nodes_max);
+            steps += 1;
+            const node = &forest.nodes[index];
+            if (!forest.is_leaf(index)) {
+                const thousandths = node.ratio * 1000 / tree.ratio_unit;
+                text.print("{{\"split\":\"{s}\",\"ratio\":0.{d:0>3},\"first\":", .{
+                    @tagName(node.split), thousandths,
+                });
+                continue;
             }
-            const visible = engine.workspace_visible(workspace);
-            if (count == 0 and !visible) continue;
-            const mark: u8 = if (workspace == engine.workspace_current()) '*' else ' ';
-            const monitor =
-                if (engine.monitors_count > 0) engine.workspace_monitor(workspace) + 1 else 0;
-            text.print("{c}{d}\tmonitor={d}\t{s}\twindows={d}\n", .{
-                mark, workspace + 1, monitor, if (visible) "visible" else "hidden", count,
-            });
+            text.print("{{\"window\":{d}}}", .{node.window});
+            var child = index;
+            while (child != root and forest.nodes[forest.nodes[child].parent].second == child) {
+                text.append("}");
+                child = forest.nodes[child].parent;
+            }
+            if (child != root) text.append(",\"second\":");
         }
     }
 

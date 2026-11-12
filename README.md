@@ -26,8 +26,8 @@ Checked live, each against an independent Accessibility read of every window:
 
 Not checked live yet: hot keys that use only option or option-shift (Secure Input was on
 during the trial, see [docs/INSTALL.md](docs/INSTALL.md)), `tatami rescue` with windows
-actually parked, binding modes, warp with nobody on that side (simulated only), more than
-one display, native tabs, sticky windows, rules, applications that hang.
+actually parked, binding modes, more than one display, native tabs, sticky windows, rules,
+applications that hang.
 
 Measured live, from the command line including process start: focus 15 to 55 ms, workspace
 switch 45 to 100 ms. Almost all of it is the applications answering Accessibility calls;
@@ -66,7 +66,12 @@ tatami check            # permission, configuration, displays, Secure Input
 tatami probe            # what Accessibility reports for every window, and how fast
 tatami start --verbose  # run in the foreground
 tatami focus west       # any command from the config also works from the CLI
-tatami query windows    # windows | workspaces | monitors | focus | stats
+tatami help             # every command
+tatami query windows    # windows | workspaces | monitors | focus | tree | bindings | stats
+tatami query tree --json  # every query also answers as JSON
+tatami label editor     # name the focused window, then: focus editor, move below editor
+tatami events           # follow what changes, one line per event
+tatami wait 186         # return when window 186 closes
 tatami reload           # re-read the config; a file with errors is rejected as a whole
 tatami quit             # brings every parked window back, then exits
 tatami rescue           # the same, without a running daemon
@@ -83,6 +88,13 @@ while that mode is active, and `mode <name>` switches (also `tatami mode main` f
 CLI). The default has AeroSpace's service mode on option-shift-; with esc, backspace
 (close the other windows), f (float) and r (retile). A mode with no binding that leaves it
 is rejected, so a key press can never strand you in one.
+
+Commands can name the windows they act on, by the id that `query windows` prints or by
+a label: `swap 186 logs`, `move logs right editor --ratio 30`, `zoom editor --on`,
+`float 186 --bounds 0.25,0.25,0.5,0.5`. This part of the command line is modelled on
+Rex's; [docs/REX.md](docs/REX.md) lists what was taken and what was not. Every command
+ends with the same statuses: 0 done, 1 failed, 2 not a command, 3 no such window or
+workspace, 4 the manager is not running.
 
 ## What it does not do
 

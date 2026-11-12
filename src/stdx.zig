@@ -132,11 +132,75 @@ pub const Text = struct {
         text.len += @intCast(written.len);
     }
 
+    pub fn append(text: *Text, bytes: []const u8) void {
+        assert(text.len <= text.buffer.len);
+        if (bytes.len > text.buffer.len - text.len) {
+            text.truncated = true;
+            return;
+        }
+        @memcpy(text.buffer[text.len..][0..bytes.len], bytes);
+        text.len += @intCast(bytes.len);
+    }
+
+    /// Writes value as a JSON string. Bytes that are not UTF-8, as at the end of a title
+    /// that was cut to fit, become question marks.
+    pub fn json_string(text: *Text, value: []const u8) void {
+        text.append("\"");
+        var index: usize = 0;
+        while (index < value.len) {
+            const len = utf8_len(value[index..]);
+            if (len == 0) {
+                text.append("?");
+                index += 1;
+            } else if (len > 1) {
+                text.append(value[index..][0..len]);
+                index += len;
+            } else {
+                text.json_byte(value[index]);
+                index += 1;
+            }
+        }
+        text.append("\"");
+    }
+
+    fn json_byte(text: *Text, byte: u8) void {
+        assert(byte < 0x80);
+        switch (byte) {
+            '"' => text.append("\\\""),
+            '\\' => text.append("\\\\"),
+            '\n' => text.append("\\n"),
+            '\t' => text.append("\\t"),
+            else => {
+                if (byte < 0x20 or byte == 0x7f) {
+                    text.print("\\u{x:0>4}", .{byte});
+                } else {
+                    text.append(&[1]u8{byte});
+                }
+            },
+        }
+    }
+
     pub fn slice(text: *const Text) []const u8 {
         assert(text.len <= text.buffer.len);
         return text.buffer[0..text.len];
     }
 };
+
+/// The length of the UTF-8 sequence that starts the bytes, or 0 when they start with none.
+fn utf8_len(bytes: []const u8) usize {
+    assert(bytes.len > 0);
+    const lead = bytes[0];
+    if (lead < 0x80) return 1;
+    var len: usize = 0;
+    if (lead >= 0xc2 and lead <= 0xdf) len = 2;
+    if (lead >= 0xe0 and lead <= 0xef) len = 3;
+    if (lead >= 0xf0 and lead <= 0xf4) len = 4;
+    if (len == 0 or bytes.len < len) return 0;
+    for (bytes[1..len]) |byte| {
+        if (byte & 0xc0 != 0x80) return 0;
+    }
+    return len;
+}
 
 test "prng is deterministic and bounded" {
     var a = Prng.init(42);
@@ -166,4 +230,9 @@ test "text helpers" {
     text.print("{d}", .{123456789});
     try std.testing.expectEqualStrings("1234", text.slice());
     try std.testing.expect(text.truncated);
+    var wide: [64]u8 = undefined;
+    var json = Text.init(&wide);
+    json.json_string("a\"b\\c\td\x01 \xc3\xa9 \xe2\x82");
+    try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\td\\u0001 \xc3\xa9 ??\"", json.slice());
+    try std.testing.expect(!json.truncated);
 }

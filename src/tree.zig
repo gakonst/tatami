@@ -340,6 +340,17 @@ pub const Forest = struct {
         }
     }
 
+    /// Gives a leaf this share of the split it is one half of, in percent.
+    pub fn share_set(forest: *Forest, leaf: NodeIndex, percent: u32) void {
+        assert(forest.is_leaf(leaf));
+        assert(percent >= 1 and percent <= 99);
+        const parent = forest.nodes[leaf].parent;
+        if (parent == node_none) return;
+        const share = ratio_unit * percent / 100;
+        const ratio = if (forest.nodes[parent].first == leaf) share else ratio_unit - share;
+        forest.nodes[parent].ratio = std.math.clamp(ratio, ratio_min, ratio_max);
+    }
+
     pub fn swap_windows(forest: *Forest, a: NodeIndex, b: NodeIndex) void {
         assert(forest.is_leaf(a) and forest.is_leaf(b));
         assert(a != b);

@@ -2,6 +2,8 @@
 //!
 //!   tatami start            run the window manager (this is what launchd runs)
 //!   tatami <command...>     send a command to the running manager, e.g. tatami focus west
+//!   tatami events           follow what changes, one line per event, until interrupted
+//!   tatami wait <window>    return when a window closes
 //!   tatami check            permissions, configuration and whether a manager is running
 //!   tatami probe            read-only: list every window Accessibility reports, with timings
 //!   tatami rescue           bring windows that are parked off screen back; needs no manager
@@ -54,6 +56,12 @@ pub export fn main(argc: c_int, argv: [*][*:0]u8) c_int {
         _ = c.write(1, config_module.default_source.ptr, config_module.default_source.len);
         return 0;
     }
+    if (std.mem.eql(u8, first, "events")) {
+        const json = count == 3 and std.mem.eql(u8, std.mem.span(argv[2]), "--json");
+        if (count > 3 or (count == 3 and !json)) return usage(2);
+        return events(json);
+    }
+    if (std.mem.eql(u8, first, "wait")) return wait(argv[2..count]);
     // Anything else is a command for the running manager.
     var request: [ipc.request_max]u8 = undefined;
     var text = stdx.Text.init(&request);
@@ -69,18 +77,116 @@ pub export fn main(argc: c_int, argv: [*][*:0]u8) c_int {
         std.debug.print("tatami: {s}: {s}\n", .{ @errorName(err), text.slice() });
         return 2;
     };
-    const ok = ipc.client(text.slice()) catch |err| {
-        switch (err) {
-            error.NotRunning => {
-                std.debug.print("tatami: not running (start it with: tatami start)\n", .{});
-            },
-            error.Timeout => {
-                std.debug.print("tatami: no reply within {d} ms\n", .{ipc.reply_timeout_ms});
-            },
+    const reply = ipc.ask(text.slice()) catch |err| return client_failed(err);
+    const status = reply_status(reply);
+    _ = c.write(if (status == 0) 1 else 2, reply.ptr, reply.len);
+    return status;
+}
+
+// Exit statuses, the same for every command sent to the manager:
+//   0 done   1 failed   2 not a command   3 no such window or workspace, or several
+//   4 the manager is not running
+
+fn reply_status(reply: []const u8) c_int {
+    if (!std.mem.startsWith(u8, reply, "error")) return 0;
+    const missing = std.mem.startsWith(u8, reply, "error: not-found") or
+        std.mem.startsWith(u8, reply, "error: ambiguous");
+    return if (missing) 3 else 1;
+}
+
+fn client_failed(err: ipc.ClientError) c_int {
+    switch (err) {
+        error.NotRunning => {
+            std.debug.print("tatami: not running (start it with: tatami start)\n", .{});
+            return 4;
+        },
+        error.Timeout => {
+            std.debug.print("tatami: no reply within {d} ms\n", .{ipc.reply_timeout_ms});
+            return 1;
+        },
+    }
+}
+
+/// Copies events to stdout until the manager stops or the reader goes away.
+fn events(json: bool) c_int {
+    const request = if (json) "events --json" else "events";
+    const fd = ipc.open(request, 0) catch |err| return client_failed(err);
+    defer _ = c.close(fd);
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const got = c.read(fd, &buffer, buffer.len);
+        if (got <= 0) return 4;
+        if (c.write(1, &buffer, @intCast(got)) <= 0) return 0;
+    }
+}
+
+/// tatami wait <window> [--for <seconds>]: returns 0 when the window has closed, 1 when
+/// the time ran out first.
+fn wait(args: []const [*:0]u8) c_int {
+    if (args.len != 1 and args.len != 3) return usage(2);
+    var seconds: i32 = 0;
+    if (args.len == 3) {
+        if (!std.mem.eql(u8, std.mem.span(args[1]), "--for")) return usage(2);
+        seconds = stdx.parse_int(std.mem.span(args[2])) orelse return usage(2);
+        if (seconds < 1 or seconds > 86_400) return usage(2);
+    }
+    // Follow first and look the window up second, so that it cannot close in between.
+    const fd = ipc.open("events", 0) catch |err| return client_failed(err);
+    defer _ = c.close(fd);
+    var request_buffer: [ipc.request_max]u8 = undefined;
+    var request = stdx.Text.init(&request_buffer);
+    request.print("query window {s}", .{std.mem.span(args[0])});
+    if (request.truncated) return usage(2);
+    var pool: command.StringPool = .{};
+    _ = command.parse(request.slice(), &pool) catch return usage(2);
+    const reply = ipc.ask(request.slice()) catch |err| return client_failed(err);
+    if (reply_status(reply) != 0) {
+        _ = c.write(2, reply.ptr, reply.len);
+        return reply_status(reply);
+    }
+    const id_end = std.mem.indexOfScalar(u8, reply, '\n') orelse return 1;
+    if (!std.mem.startsWith(u8, reply, "id=")) return 1;
+    const id = stdx.parse_int(reply["id=".len..id_end]) orelse return 1;
+    const limit_ms = @as(u64, @intCast(seconds)) * 1000;
+    return wait_closed(fd, id, if (seconds > 0) c.now_ms() + limit_ms else 0);
+}
+
+fn window_gone(id: i32) bool {
+    var request_buffer: [64]u8 = undefined;
+    var request = stdx.Text.init(&request_buffer);
+    request.print("query window {d}", .{id});
+    const reply = ipc.ask(request.slice()) catch return true;
+    return reply_status(reply) == 3;
+}
+
+/// Reads events until the one that says the window closed.
+fn wait_closed(fd: c_int, id: i32, deadline_ms: u64) c_int {
+    var needle_buffer: [64]u8 = undefined;
+    var needle = stdx.Text.init(&needle_buffer);
+    needle.print("window_closed\t{d}", .{id});
+    var buffer: [4096]u8 = undefined;
+    var len: usize = 0;
+    while (true) {
+        if (deadline_ms != 0) {
+            const now_ms = c.now_ms();
+            if (now_ms >= deadline_ms) return 1;
+            ipc.timeout_set(fd, @intCast(deadline_ms - now_ms));
         }
-        return 1;
-    };
-    return if (ok) 0 else 1;
+        const got = c.read(fd, buffer[len..].ptr, buffer.len - len);
+        if (got == 0) return 4;
+        if (got < 0 and deadline_ms == 0) return 1;
+        if (got < 0) continue;
+        len += @intCast(got);
+        while (std.mem.indexOfScalar(u8, buffer[0..len], '\n')) |end| {
+            const line = buffer[0..end];
+            if (std.mem.eql(u8, line, needle.slice())) return 0;
+            // After an overflow the closing may have gone unreported: look.
+            if (std.mem.eql(u8, line, "overflow") and window_gone(id)) return 0;
+            std.mem.copyForwards(u8, buffer[0 .. len - end - 1], buffer[end + 1 .. len]);
+            len -= end + 1;
+        }
+        if (len == buffer.len) len = 0;
+    }
 }
 
 fn usage(code: c_int) c_int {
@@ -89,7 +195,17 @@ fn usage(code: c_int) c_int {
         \\       tatami <command>      for example: tatami focus west, tatami workspace 3,
         \\                             tatami query windows, tatami reload, tatami quit
         \\
+        \\commands:
+        \\
     , .{});
+    var buffer: [8192]u8 = undefined;
+    var text = stdx.Text.init(&buffer);
+    for (command.reference) |entry| {
+        text.print("  {s}\n      {s}\n", .{ entry.syntax, entry.summary });
+    }
+    text.print("\n{s}", .{command.reference_notes});
+    assert(!text.truncated);
+    _ = c.write(if (code == 0) 1 else 2, &buffer, text.len);
     return code;
 }
 
@@ -145,8 +261,11 @@ fn check() c_int {
         out("secure input: off\n", .{});
     }
     out("manager: ", .{});
-    const running = ipc.client("query stats") catch false;
-    if (!running) out("not running\n", .{});
+    if (ipc.ask("query stats")) |stats| {
+        _ = c.write(1, stats.ptr, stats.len);
+    } else |_| {
+        out("not running\n", .{});
+    }
     return if (trusted) 0 else 1;
 }
 

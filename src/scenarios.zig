@@ -460,3 +460,246 @@ test "quitting brings every parked window back on screen" {
     os.command_run("workspace 1");
     try testing.expectEqual(@as(u32, 0), engine.effects_count);
 }
+
+// Commands that name their windows, after Rex's command line (docs/REX.md).
+
+/// Runs a command built from a format string and returns what the engine answered.
+fn run(os: *sim.Simulator, comptime format: []const u8, args: anytype) []const u8 {
+    var buffer: [128]u8 = undefined;
+    const text = std.fmt.bufPrint(&buffer, format, args) catch unreachable;
+    os.command_run(text);
+    return engine.reply();
+}
+
+fn expect_reply(prefix: []const u8, reply: []const u8) !void {
+    if (std.mem.startsWith(u8, reply, prefix)) return;
+    std.debug.print("expected a reply starting with {s}, found {s}\n", .{ prefix, reply });
+    return error.TestUnexpectedResult;
+}
+
+test "windows are addressed by id and by label" {
+    const os = boot("");
+    const app = os.app_launch("Ghostty", "com.mitchellh.ghostty");
+    const a = open(os, app, .{});
+    const b = open(os, app, .{});
+    const c = open(os, app, .{});
+    os.settle();
+    try testing.expectEqual(c, engine.focused_window);
+    try expect_reply("", run(os, "label {d} editor", .{a}));
+    _ = run(os, "focus editor", .{});
+    try testing.expectEqual(a, engine.focused_window);
+    _ = run(os, "focus {d}", .{c});
+    try testing.expectEqual(c, engine.focused_window);
+    // Only the two windows trade places.
+    const a_before = frame_of(a);
+    const c_before = frame_of(c);
+    _ = run(os, "swap editor {d}", .{c});
+    os.settle();
+    try expect_frame(c_before, a);
+    try expect_frame(a_before, c);
+    try expect_frame(Rect.init(864, 38, 864, 540), b);
+    // A name that fits nothing or several things changes nothing and says so.
+    try expect_reply("error: not-found", run(os, "focus 9999", .{}));
+    try expect_reply("error: not-found", run(os, "focus logs", .{}));
+    _ = run(os, "label {d} Editor", .{b});
+    try expect_reply("error: ambiguous", run(os, "focus editor", .{}));
+    try testing.expectEqual(c, engine.focused_window);
+    _ = run(os, "label {d} --clear", .{b});
+    _ = run(os, "focus EDITOR", .{});
+    try testing.expectEqual(a, engine.focused_window);
+    try expect_reply("error: bad-request", run(os, "swap editor {d}", .{a}));
+}
+
+test "move puts a window beside any other one, with its share of the split" {
+    const os = boot("");
+    const app = os.app_launch("Zed", "dev.zed.Zed");
+    const a = open(os, app, .{});
+    const b = open(os, app, .{});
+    os.settle();
+    try expect_frame(left_half, a);
+    _ = run(os, "move {d} below {d} --ratio 30", .{ a, b });
+    os.settle();
+    try testing.expect(frame_of(b).y < frame_of(a).y);
+    try testing.expectEqual(screen.w, frame_of(a).w);
+    try testing.expectEqual(screen.w, frame_of(b).w);
+    try testing.expectEqual(screen.h, frame_of(a).h + frame_of(b).h);
+    try testing.expect(@abs(frame_of(a).h * 100 - screen.h * 30) < 200);
+    // From another workspace, and focus goes along when the window had it.
+    const c = open(os, app, .{});
+    os.settle();
+    _ = run(os, "send 2", .{});
+    os.settle();
+    try testing.expect(parked(c));
+    try testing.expect(engine.focused_window != c);
+    _ = run(os, "move {d} left {d}", .{ c, a });
+    os.settle();
+    try testing.expectEqual(@as(u8, 0), engine.window_find(c).?.workspace);
+    try testing.expect(frame_of(c).x < frame_of(a).x and frame_of(c).y == frame_of(a).y);
+    try testing.expect(engine.focused_window != c);
+    // A floating window joins the layout.
+    _ = run(os, "float {d}", .{b});
+    _ = run(os, "move {d} right {d}", .{ b, c });
+    os.settle();
+    try testing.expectEqual(engine_module.Mode.tiled, engine.window_find(b).?.mode);
+    try testing.expect(frame_of(b).x > frame_of(c).x and frame_of(b).y == frame_of(c).y);
+    _ = run(os, "float {d}", .{c});
+    try expect_reply("error: conflict", run(os, "move {d} left {d}", .{ a, c }));
+}
+
+test "focus next and prev follow the layout order, and wrap when asked" {
+    const os = boot("");
+    const app = os.app_launch("Ghostty", "com.mitchellh.ghostty");
+    const a = open(os, app, .{});
+    const b = open(os, app, .{});
+    const c = open(os, app, .{});
+    os.settle();
+    os.command_run("focus next");
+    try testing.expectEqual(c, engine.focused_window);
+    os.command_run("focus next --wrap");
+    try testing.expectEqual(a, engine.focused_window);
+    os.command_run("focus next");
+    try testing.expectEqual(b, engine.focused_window);
+    os.command_run("focus prev");
+    os.command_run("focus prev");
+    try testing.expectEqual(a, engine.focused_window);
+    os.command_run("focus prev --wrap");
+    try testing.expectEqual(c, engine.focused_window);
+    // By direction: from the left edge around to the window furthest right.
+    os.command_run("focus west");
+    os.command_run("focus west");
+    try testing.expectEqual(a, engine.focused_window);
+    os.command_run("focus west --wrap");
+    try testing.expect(engine.focused_window == b or engine.focused_window == c);
+    os.command_run("focus east --wrap");
+    try testing.expectEqual(a, engine.focused_window);
+    os.settle();
+    try testing.expectEqual(a, os.focused);
+}
+
+test "zoom, float with bounds and tile take the window they name" {
+    const os = boot("");
+    const app = os.app_launch("Zed", "dev.zed.Zed");
+    const a = open(os, app, .{});
+    const b = open(os, app, .{});
+    os.settle();
+    try testing.expectEqual(b, engine.focused_window);
+    _ = run(os, "zoom {d} --on", .{a});
+    os.settle();
+    try expect_frame(screen, a);
+    try testing.expectEqual(a, engine.focused_window);
+    _ = run(os, "zoom --on", .{});
+    os.settle();
+    try expect_frame(screen, a);
+    _ = run(os, "zoom --off", .{});
+    os.settle();
+    try expect_frame(left_half, a);
+    _ = run(os, "float {d} --bounds 0.25,0.25,0.5,0.5", .{b});
+    os.settle();
+    try expect_frame(Rect.init(432, 307, 864, 539), b);
+    try expect_frame(screen, a);
+    _ = run(os, "tile {d}", .{b});
+    os.settle();
+    try testing.expect(frame_of(a).w + frame_of(b).w == screen.w);
+}
+
+test "insert takes a share for the next window, and resize ratio sets one" {
+    const os = boot("");
+    const app = os.app_launch("Zed", "dev.zed.Zed");
+    const a = open(os, app, .{});
+    os.settle();
+    os.command_run("insert west --ratio 25");
+    const b = open(os, app, .{});
+    os.settle();
+    try expect_frame(Rect.init(0, 38, 432, 1079), b);
+    try expect_frame(Rect.init(432, 38, 1296, 1079), a);
+    os.command_run("resize ratio 50");
+    os.settle();
+    try expect_frame(left_half, b);
+    // The share is spent: the next window splits evenly.
+    const c = open(os, app, .{});
+    os.settle();
+    try testing.expectEqual(frame_of(b).h, frame_of(c).h + 1);
+}
+
+test "workspaces can be labelled and named in commands" {
+    const os = boot("");
+    const app = os.app_launch("Zed", "dev.zed.Zed");
+    _ = open(os, app, .{});
+    os.settle();
+    os.command_run("label-workspace web");
+    os.command_run("workspace 2");
+    try testing.expectEqual(@as(u8, 1), engine.workspace_current());
+    try expect_reply("", run(os, "workspace WEB", .{}));
+    try testing.expectEqual(@as(u8, 0), engine.workspace_current());
+    try expect_reply("error: not-found", run(os, "workspace mail", .{}));
+    const b = open(os, app, .{});
+    os.settle();
+    os.command_run("workspace 3");
+    os.command_run("label-workspace mail");
+    os.command_run("workspace web");
+    _ = run(os, "focus {d}", .{b});
+    os.command_run("send mail --follow");
+    os.settle();
+    try testing.expectEqual(@as(u8, 2), engine.workspace_current());
+    try testing.expectEqual(b, engine.focused_window);
+    try testing.expect(std.mem.indexOf(u8, run(os, "query workspaces", .{}), "\tmail\n") != null);
+}
+
+test "queries answer as lines or as JSON, and the tree carries a revision" {
+    const os = boot("");
+    const app = os.app_launch("Zed", "dev.zed.Zed");
+    const a = open(os, app, .{ .title = "say \"hi\"" });
+    const b = open(os, app, .{});
+    os.settle();
+    var expected: [256]u8 = undefined;
+    const layout = std.fmt.bufPrint(
+        &expected,
+        "\"layout\":{{\"split\":\"columns\",\"ratio\":0.500,\"first\":{{\"window\":{d}}}," ++
+            "\"second\":{{\"window\":{d}}}}},\"floating\":[]",
+        .{ a, b },
+    ) catch unreachable;
+    const tree_json = run(os, "query tree --json", .{});
+    try testing.expect(std.mem.indexOf(u8, tree_json, layout) != null);
+    try expect_reply("{\"revision\":", tree_json);
+    const revision = engine.revision;
+    try testing.expect(revision > 0);
+    // Asking changes nothing; moving a window does.
+    _ = run(os, "query tree", .{});
+    try testing.expectEqual(revision, engine.revision);
+    os.command_run("swap west");
+    try testing.expectEqual(revision + 1, engine.revision);
+    const notes = engine.notes_slice();
+    try testing.expectEqual(@as(usize, 1), notes.len);
+    try testing.expectEqual(engine_module.Note{ .view_changed = revision + 1 }, notes[0]);
+    const windows = run(os, "query windows --json", .{});
+    try expect_reply("{\"windows\":[{\"id\":", windows);
+    try testing.expect(std.mem.indexOf(u8, windows, "\"title\":\"say \\\"hi\\\"\"") != null);
+    try expect_reply("id=", run(os, "query window {d}", .{a}));
+    try expect_reply("{\"id\":", run(os, "query window {d} --json", .{a}));
+    try expect_reply("main\tcmd-h\tfocus west\n", run(os, "query bindings", .{}));
+    const bindings = run(os, "query bindings --json", .{});
+    try expect_reply("{\"bindings\":[{\"mode\":\"main\",\"keys\":\"cmd-h\"", bindings);
+    try expect_reply(" main\n", run(os, "query modes", .{}));
+    try expect_reply("focus <direction> [--wrap]\t", run(os, "query commands", .{}));
+    try expect_reply("{\"events\":", run(os, "query stats --json", .{}));
+    try expect_reply("{\"window\":", run(os, "query focus --json", .{}));
+    try expect_reply("{\"monitors\":[{\"index\":1,", run(os, "query monitors --json", .{}));
+    try expect_reply("{\"workspaces\":[{\"index\":1,", run(os, "query workspaces --json", .{}));
+}
+
+test "a step says what it changed" {
+    const os = boot("");
+    const app = os.app_launch("Zed", "dev.zed.Zed");
+    const a = open(os, app, .{});
+    os.settle();
+    os.command_run("workspace 2");
+    const notes = engine.notes_slice();
+    try testing.expectEqual(@as(usize, 3), notes.len);
+    try testing.expectEqual(engine_module.Note{ .workspace_changed = 2 }, notes[0]);
+    try testing.expectEqual(engine_module.Note{ .focus_changed = 0 }, notes[1]);
+    try testing.expect(notes[2] == .view_changed);
+    os.command_run("workspace 1");
+    try testing.expectEqual(engine_module.Note{ .focus_changed = a }, engine.notes_slice()[1]);
+    os.command_run("query windows");
+    try testing.expectEqual(@as(usize, 0), engine.notes_slice().len);
+}

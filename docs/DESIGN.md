@@ -27,6 +27,11 @@ changed / focused, focus reported, command, tick.
 
 Effects: set frame, focus window, close window, warp mouse, exec, query focus, reload, quit.
 
+A step also leaves notes of what it changed (a window taken on or gone, focus, the
+workspace in use, the layout's revision). The shell passes them on to whoever follows
+`tatami events`. The revision comes from a hash of everything a query can show, taken after
+each step, so no code path can change the layout without it counting.
+
 Layout is a binary space partition per workspace, kept in one static pool of nodes
 (`tree.zig`). Tree walks are iterative; nothing recurses.
 

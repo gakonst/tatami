@@ -35,6 +35,9 @@ pub const Binding = struct {
     keycode: u16,
     commands: [commands_per_binding_max]Command,
     commands_count: u8,
+    /// The keys and the commands as the configuration wrote them, for 'query bindings'.
+    keys: Span,
+    source: Span,
 };
 
 pub const RuleAction = union(enum) {
@@ -272,6 +275,8 @@ pub const Config = struct {
             binding.commands_count += 1;
         }
         assert(binding.commands_count > 0);
+        binding.keys = try config.strings.add(chord);
+        binding.source = try config.strings.add(command.trim(rest[colon + 1 ..]));
         if (config.bindings_count == bindings_max) return error.TooManyBindings;
         config.bindings[config.bindings_count] = binding;
         config.bindings_count += 1;
@@ -312,6 +317,48 @@ pub const Config = struct {
         if (config.rules_count == rules_max) return error.TooManyRules;
         config.rules[config.rules_count] = rule;
         config.rules_count += 1;
+    }
+
+    /// One line per mode, or a JSON object. The mode in use, when known, is marked.
+    pub fn modes_print(config: *const Config, text: *stdx.Text, json: bool, current: ?u8) void {
+        if (json) text.append("{\"modes\":[");
+        var mode: u8 = 0;
+        while (mode < config.modes_count) : (mode += 1) {
+            const active = current != null and current.? == mode;
+            if (json) {
+                if (mode > 0) text.append(",");
+                text.append("{\"name\":");
+                text.json_string(config.mode_name(mode));
+                text.print(",\"active\":{s}}}", .{if (active) "true" else "false"});
+            } else {
+                const mark: u8 = if (active) '*' else ' ';
+                text.print("{c}{s}\n", .{ mark, config.mode_name(mode) });
+            }
+        }
+        if (json) text.append("]}\n");
+    }
+
+    /// One line per key binding, or a JSON object: the mode, the keys and what they run.
+    pub fn bindings_print(config: *const Config, text: *stdx.Text, json: bool) void {
+        if (json) text.append("{\"bindings\":[");
+        for (config.bindings[0..config.bindings_count], 0..) |*binding, index| {
+            const mode = config.mode_name(binding.mode);
+            const chord = config.strings.get(binding.keys);
+            const source = config.strings.get(binding.source);
+            if (json) {
+                if (index > 0) text.append(",");
+                text.append("{\"mode\":");
+                text.json_string(mode);
+                text.append(",\"keys\":");
+                text.json_string(chord);
+                text.append(",\"command\":");
+                text.json_string(source);
+                text.append("}");
+            } else {
+                text.print("{s}\t{s}\t{s}\n", .{ mode, chord, source });
+            }
+        }
+        if (json) text.append("]}\n");
     }
 
     /// A binding of the main mode.

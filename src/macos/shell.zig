@@ -152,6 +152,7 @@ fn process(event: Event) void {
     const effects = engine.step(event, c.now_ms());
     const count = effects.len;
     @memcpy(performing[0..count], effects);
+    if (ipc.followed()) notes_publish();
     if (verbose) trace_event(event);
     for (performing[0..count]) |effect| {
         const before_us = c.now_us();
@@ -159,6 +160,59 @@ fn process(event: Event) void {
         if (verbose) trace_effect(effect, c.now_us() - before_us);
     }
     if (verbose and count > 0) log("   {d} effects in {d} us", .{ count, c.now_us() - started_us });
+}
+
+/// Tells whoever follows 'tatami events' what the step changed. Ids only, never titles.
+fn notes_publish() void {
+    for (engine.notes_slice()) |note| {
+        const name = @tagName(note);
+        const value: u64 = switch (note) {
+            .window_created, .window_closed, .focus_changed => |id| id,
+            .workspace_changed => |workspace| workspace,
+            .view_changed => |revision| revision,
+            .overflow => 0,
+        };
+        const key = switch (note) {
+            .window_created, .window_closed, .focus_changed => "window",
+            .workspace_changed => "workspace",
+            .view_changed => "revision",
+            .overflow => "",
+        };
+        var line_buffer: [96]u8 = undefined;
+        var json_buffer: [128]u8 = undefined;
+        var line = stdx.Text.init(&line_buffer);
+        var json = stdx.Text.init(&json_buffer);
+        if (note == .overflow) {
+            line.print("{s}\n", .{name});
+            json.print("{{\"type\":\"{s}\"}}\n", .{name});
+        } else if (note == .focus_changed and value == 0) {
+            line.print("{s}\t0\n", .{name});
+            json.print("{{\"type\":\"{s}\",\"window\":null}}\n", .{name});
+        } else {
+            line.print("{s}\t{d}\n", .{ name, value });
+            json.print("{{\"type\":\"{s}\",\"{s}\":{d}}}\n", .{ name, key, value });
+        }
+        ipc.publish(line.slice(), json.slice());
+    }
+}
+
+/// Tells followers about a change that happens outside the engine.
+fn event_publish(name: []const u8, mode: ?[]const u8) void {
+    if (!ipc.followed()) return;
+    var line_buffer: [96]u8 = undefined;
+    var json_buffer: [128]u8 = undefined;
+    var line = stdx.Text.init(&line_buffer);
+    var json = stdx.Text.init(&json_buffer);
+    json.print("{{\"type\":\"{s}\"", .{name});
+    if (mode) |mode_name| {
+        line.print("{s}\t{s}\n", .{ name, mode_name });
+        json.append(",\"mode\":");
+        json.json_string(mode_name);
+    } else {
+        line.print("{s}\n", .{name});
+    }
+    json.append("}\n");
+    ipc.publish(line.slice(), json.slice());
 }
 
 /// One line per event for 'start --verbose'. Never prints window titles.
@@ -714,6 +768,7 @@ fn mode_enter(mode: u8) void {
     if (mode == mode_current) return;
     mode_current = mode;
     hot_keys_register();
+    event_publish("mode_changed", engine.config.mode_name(mode));
 }
 
 // Timer: one run loop timer serves every deadline.
@@ -825,6 +880,7 @@ fn config_load(reload: bool) void {
     if (reload) {
         mode_current = 0;
         hot_keys_register();
+        event_publish("config_reloaded", null);
     }
 }
 
@@ -848,6 +904,11 @@ fn ipc_request(text: []const u8, reply: *stdx.Text) void {
         };
         mode_enter(mode);
         reply.print("ok\n", .{});
+        return;
+    }
+    if (parsed == .query and parsed.query.what == .modes) {
+        // Only the shell knows which mode's keys are registered.
+        engine.config.modes_print(reply, parsed.query.json, mode_current);
         return;
     }
     dispatch(.{ .command = parsed });
