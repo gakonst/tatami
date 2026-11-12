@@ -13,6 +13,8 @@ pub const bindings_max = 192;
 pub const rules_max = 64;
 pub const commands_per_binding_max = 4;
 pub const gap_max = 200;
+pub const border_width_max = 32;
+pub const border_radius_max = 64;
 /// Binding modes, including main.
 pub const modes_max = 8;
 
@@ -150,6 +152,26 @@ pub fn key_name(code: u16) []const u8 {
     return "?";
 }
 
+/// RRGGBB or AARRGGBB in hex, with or without a leading # or 0x, as 0xAARRGGBB.
+fn color_parse(text: []const u8) ?u32 {
+    var digits = text;
+    if (std.mem.startsWith(u8, digits, "#")) digits = digits[1..];
+    if (std.mem.startsWith(u8, digits, "0x")) digits = digits[2..];
+    if (digits.len != 6 and digits.len != 8) return null;
+    var value: u32 = 0;
+    for (digits) |digit| {
+        const nibble: u32 = switch (digit) {
+            '0'...'9' => digit - '0',
+            'a'...'f' => digit - 'a' + 10,
+            'A'...'F' => digit - 'A' + 10,
+            else => return null,
+        };
+        value = value << 4 | nibble;
+    }
+    if (digits.len == 6) value |= 0xff000000;
+    return value;
+}
+
 const LineError = error{
     UnknownDirective,
     MissingSeparator,
@@ -160,6 +182,7 @@ const LineError = error{
     TooManyCommands,
     TooManyRules,
     BadGap,
+    BadBorder,
     BadRule,
     BadAction,
     BadMode,
@@ -171,6 +194,11 @@ pub const Config = struct {
     gap_inner: i32,
     gap_outer: i32,
     gap_toggle: i32,
+    /// The border drawn around the focused window, in pixels. 0 draws none.
+    border_width: i32,
+    border_radius: i32,
+    /// 0xAARRGGBB.
+    border_color: u32,
     bindings: [bindings_max]Binding,
     bindings_count: u32,
     rules: [rules_max]Rule,
@@ -183,6 +211,9 @@ pub const Config = struct {
         config.gap_inner = 0;
         config.gap_outer = 0;
         config.gap_toggle = 10;
+        config.border_width = 0;
+        config.border_radius = 0;
+        config.border_color = 0xff4c7899;
         config.bindings_count = 0;
         config.rules_count = 0;
         config.strings = .{};
@@ -302,6 +333,7 @@ pub const Config = struct {
         const directive = line[0..space];
         const rest = command.trim(line[space..]);
         if (std.mem.eql(u8, directive, "gap")) return config.load_gap(rest);
+        if (std.mem.eql(u8, directive, "border")) return config.load_border(rest);
         if (std.mem.eql(u8, directive, "bind")) return config.load_binding(rest);
         if (std.mem.eql(u8, directive, "rule")) return config.load_rule(rest);
         return error.UnknownDirective;
@@ -320,6 +352,26 @@ pub const Config = struct {
             config.gap_toggle = value;
         } else {
             return error.BadGap;
+        }
+    }
+
+    fn load_border(config: *Config, rest: []const u8) LineError!void {
+        const space = std.mem.indexOfAny(u8, rest, " \t") orelse return error.BadBorder;
+        const which = rest[0..space];
+        const value = command.trim(rest[space..]);
+        if (std.mem.eql(u8, which, "color")) {
+            config.border_color = color_parse(value) orelse return error.BadBorder;
+            return;
+        }
+        const number = stdx.parse_int(value) orelse return error.BadBorder;
+        if (std.mem.eql(u8, which, "width")) {
+            if (number < 0 or number > border_width_max) return error.BadBorder;
+            config.border_width = number;
+        } else if (std.mem.eql(u8, which, "radius")) {
+            if (number < 0 or number > border_radius_max) return error.BadBorder;
+            config.border_radius = number;
+        } else {
+            return error.BadBorder;
         }
     }
 
@@ -556,6 +608,41 @@ test "a bad file reports every bad line and loads nothing partially" {
     try testing.expect(std.mem.indexOf(u8, report, "line 7: BadAction") != null);
     try testing.expect(std.mem.indexOf(u8, report, "line 8") == null);
     try testing.expect(std.mem.indexOf(u8, report, "line 1:") == null);
+}
+
+test "the border of the focused window" {
+    var config: Config = undefined;
+    var buffer: [1024]u8 = undefined;
+    var diagnostics = stdx.Text.init(&buffer);
+    const source =
+        \\border width 3
+        \\border radius 10
+        \\border color #5E81AC
+    ;
+    try testing.expect(config.load(source, &diagnostics));
+    try testing.expectEqual(@as(i32, 3), config.border_width);
+    try testing.expectEqual(@as(i32, 10), config.border_radius);
+    try testing.expectEqual(@as(u32, 0xff5e81ac), config.border_color);
+    try testing.expect(config.load("border color 0x805e81ac", &diagnostics));
+    try testing.expectEqual(@as(u32, 0x805e81ac), config.border_color);
+    const bad =
+        \\border width 33
+        \\border radius -1
+        \\border color 5e81a
+        \\border color 5e81ag
+        \\border glow 3
+        \\border width
+    ;
+    diagnostics = stdx.Text.init(&buffer);
+    try testing.expect(!config.load(bad, &diagnostics));
+    const report = diagnostics.slice();
+    var line: u8 = 1;
+    while (line <= 6) : (line += 1) {
+        var expected_buffer: [32]u8 = undefined;
+        var expected = stdx.Text.init(&expected_buffer);
+        expected.print("line {d}: BadBorder", .{line});
+        try testing.expect(std.mem.indexOf(u8, report, expected.slice()) != null);
+    }
 }
 
 test "a binding that reloads the configuration does nothing else" {
