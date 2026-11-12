@@ -18,6 +18,7 @@ pub const Error = error{ Unresponsive, Invalid, Failed };
 pub const Names = struct {
     windows: Ref,
     focused_window: Ref,
+    focused: Ref,
     main_window: Ref,
     position: Ref,
     size: Ref,
@@ -136,6 +137,7 @@ pub fn init() void {
     names = .{
         .windows = name("AXWindows"),
         .focused_window = name("AXFocusedWindow"),
+        .focused = name("AXFocused"),
         .main_window = name("AXMainWindow"),
         .position = name("AXPosition"),
         .size = name("AXSize"),

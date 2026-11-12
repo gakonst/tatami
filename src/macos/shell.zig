@@ -411,8 +411,18 @@ fn perform_focus(id: u32, pid: i32) void {
         },
         error.Failed => {},
     };
-    _ = c.AXUIElementPerformAction(window.element, ax.names.raise);
     ax.bool_set(app.element, ax.names.frontmost, true);
+    {
+        const pool = c.objc_autoreleasePoolPush();
+        defer c.objc_autoreleasePoolPop(pool);
+        const class = c.objc_getClass("NSRunningApplication");
+        const running = c.send_pid(class, "runningApplicationWithProcessIdentifier:", pid);
+        if (running != null) {
+            _ = c.send_index(running, "activateWithOptions:", 1 << 1);
+        }
+    }
+    ax.bool_set(window.element, ax.names.focused, true);
+    _ = c.AXUIElementPerformAction(window.element, ax.names.raise);
 }
 
 fn perform_warp(area: Rect) void {
@@ -828,6 +838,7 @@ fn app_observe(app: *ShellApp) void {
     app.retry_at_ms = 0;
     app.hidden = ax.bool_get(app.element, ax.names.hidden);
     windows_scan(app, list);
+    app.adopted = false;
 }
 
 fn windows_scan(app: *ShellApp, list: Ref) void {
