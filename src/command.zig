@@ -29,7 +29,8 @@ pub const Label = struct {
     }
 
     /// Labels start with a letter, so they are never mistaken for a window id or a
-    /// workspace number, and are none of the words that commands give a meaning to.
+    /// workspace number, and are none of the words that commands give a meaning to, in
+    /// capitals or not: a label is matched without regard to case.
     pub fn parse(word: []const u8) ?Label {
         if (word.len == 0 or word.len > label_max) return null;
         if (!is_letter(word[0])) return null;
@@ -39,11 +40,14 @@ pub const Label = struct {
                 return null;
             }
         }
+        var folded_bytes: [label_max]u8 = undefined;
+        for (word, 0..) |byte, index| folded_bytes[index] = std.ascii.toLower(byte);
+        const folded = folded_bytes[0..word.len];
         const reserved = [_][]const u8{ "focused", "next", "prev", "recent", "new", "on", "off" };
         for (reserved) |name| {
-            if (std.mem.eql(u8, word, name)) return null;
+            if (std.mem.eql(u8, folded, name)) return null;
         }
-        if (parse_direction(word) != null) return null;
+        if (parse_direction(folded) != null) return null;
         var label: Label = .{};
         @memcpy(label.bytes[0..word.len], word);
         label.len = @intCast(word.len);
@@ -187,7 +191,11 @@ fn split_words(text: []const u8) ParseError!Words {
         if (index == text.len) break;
         const start = index;
         while (index < text.len and !is_space(text[index])) index += 1;
-        if (words.count == words_max) return error.TooManyArguments;
+        if (words.count == words_max) {
+            // What exec runs is the rest of the line as it is, however many words.
+            if (std.mem.eql(u8, words.items[0], "exec")) break;
+            return error.TooManyArguments;
+        }
         words.items[words.count] = text[start..index];
         words.count += 1;
         if (words.count == 1) words.rest = trim(text[index..]);
@@ -245,6 +253,7 @@ fn parse_fraction(word: []const u8) ParseError!u16 {
     var value: u32 = 0;
     var scale: u32 = 1000;
     var seen_point = false;
+    var digits: u32 = 0;
     for (word) |byte| {
         if (byte == '.') {
             if (seen_point) return error.BadArgument;
@@ -252,6 +261,7 @@ fn parse_fraction(word: []const u8) ParseError!u16 {
             continue;
         }
         if (byte < '0' or byte > '9') return error.BadArgument;
+        digits += 1;
         const digit: u32 = byte - '0';
         if (!seen_point) {
             value = value * 10 + digit * 1000;
@@ -261,6 +271,8 @@ fn parse_fraction(word: []const u8) ParseError!u16 {
         }
         if (value > 1000) return error.BadArgument;
     }
+    // A point on its own is not a number.
+    if (digits == 0) return error.BadArgument;
     return @intCast(value);
 }
 
@@ -781,6 +793,9 @@ test "parse commands" {
     );
     const exec = try parse("exec open -a Ghostty", &pool);
     try testing.expectEqualStrings("open -a Ghostty", pool.get(exec.exec));
+    const script = "osascript -e 'tell application \"Finder\" to make new Finder window'";
+    const long = try parse("exec " ++ script, &pool);
+    try testing.expectEqualStrings(script, pool.get(long.exec));
 }
 
 test "parse rejects malformed commands" {
@@ -799,6 +814,7 @@ test "parse rejects malformed commands" {
     try testing.expectError(error.BadArgument, parse("zoom --on --off", &pool));
     try testing.expectError(error.BadArgument, parse("float --bounds 0.5,0.5,0.6,0.5", &pool));
     try testing.expectError(error.BadArgument, parse("float --bounds 0.5,0.5,0,0.5", &pool));
+    try testing.expectError(error.BadArgument, parse("float --bounds .,.,1,1", &pool));
     try testing.expectError(error.BadArgument, parse("label left", &pool));
     try testing.expectError(error.BadArgument, parse("label 7up", &pool));
     try testing.expectError(error.MissingArgument, parse("label", &pool));
@@ -896,4 +912,16 @@ test "parse commands that name their windows" {
         Command{ .query = .{ .what = .window, .window = .{ .id = 12 } } },
         try parse("query window 12", &pool),
     );
+}
+
+test "a label is none of the words with a meaning, in capitals or not" {
+    // Or 'focus West' would name a window and 'focus west' a direction.
+    try testing.expect(Label.parse("West") == null);
+    try testing.expect(Label.parse("FOCUSED") == null);
+    try testing.expect(Label.parse("Next") == null);
+    try testing.expect(Label.parse("oN") == null);
+    try testing.expect(Label.parse("Western") != null);
+    var pool: StringPool = .{};
+    try testing.expectError(error.BadArgument, parse("label Below", &pool));
+    try testing.expectError(error.BadArgument, parse("workspace Recent", &pool));
 }

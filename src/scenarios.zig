@@ -720,3 +720,83 @@ test "windows found at startup are laid out once, in the order they sit on scree
     // One frame per window, not one layout per window that was found.
     try testing.expectEqual(@as(u64, 3), engine.stats.frames_set);
 }
+
+/// More than the one pixel of a parked window shows on the laptop or the display beside it.
+fn in_view(id: engine_module.WindowId) bool {
+    const frame = frame_of(id);
+    const desk = Rect.init(0, 0, 1728 + 2560, 1440);
+    return frame.overlap(desk, .x) > 1 and frame.overlap(desk, .y) > 1;
+}
+
+test "a restart finds every window on the workspace it was left on" {
+    const os = boot("rule app=\"Slack\" : workspace 2\n");
+    os.monitors_set(1); // Laptop on the left, external display on the right.
+    // Workspace 5 was showing on the external display, 3 on the laptop; 7 was hidden.
+    const memory = [_]engine_module.WorkspaceMemory{
+        .{ .workspace = 2, .display = 1, .shown = true },
+        .{ .workspace = 4, .display = 2, .shown = true },
+        .{ .workspace = 6, .display = 2, .shown = false },
+        .{ .workspace = 99, .display = 2, .shown = true },
+        .{ .workspace = 8, .display = 77, .shown = true },
+    };
+    os.remember(&memory);
+    try testing.expectEqual(@as(u8, 2), engine.monitors[0].workspace);
+    try testing.expectEqual(@as(u8, 4), engine.monitors[1].workspace);
+    const zed = os.app_launch("Zed", "dev.zed.Zed");
+    const slack = os.app_launch("Slack", "com.tinyspeck.slackmacgap");
+    os.adoption(.begin);
+    // The manager that quit brought every window back into view, wherever that was.
+    const a = open(os, zed, .{ .adopted = true, .left_on = 2 });
+    const b = open(os, zed, .{ .adopted = true, .left_on = 4, .focus = false });
+    const c = open(os, zed, .{ .adopted = true, .left_on = 6, .focus = false });
+    // The rule sends new Slack windows to workspace 2; this one had been moved since.
+    const d = open(os, slack, .{ .adopted = true, .left_on = 6, .focus = false });
+    // Nothing is known about this one: it stays on the display where it is found.
+    const e = open(os, zed, .{
+        .adopted = true,
+        .focus = false,
+        .frame = Rect.init(2000, 200, 900, 700),
+    });
+    // A number that is no workspace is as good as nothing.
+    const f = open(os, zed, .{
+        .adopted = true,
+        .left_on = 200,
+        .focus = false,
+        .frame = Rect.init(100, 100, 900, 700),
+    });
+    os.adoption(.end);
+    os.settle();
+    try testing.expectEqual(@as(u8, 2), engine.window_find(a).?.workspace);
+    try testing.expectEqual(@as(u8, 4), engine.window_find(b).?.workspace);
+    try testing.expectEqual(@as(u8, 6), engine.window_find(c).?.workspace);
+    try testing.expectEqual(@as(u8, 6), engine.window_find(d).?.workspace);
+    try testing.expectEqual(@as(u8, 4), engine.window_find(e).?.workspace);
+    try testing.expectEqual(@as(u8, 2), engine.window_find(f).?.workspace);
+    try testing.expect(!in_view(c) and !in_view(d));
+    try testing.expect(in_view(a) and in_view(b) and in_view(e) and in_view(f));
+    // Hidden workspaces still belong to the display they were on.
+    os.command_run("workspace 7");
+    os.settle();
+    try testing.expectEqual(@as(u8, 6), engine.monitors[1].workspace);
+    try testing.expect(in_view(c) and in_view(d) and !in_view(b) and !in_view(e));
+}
+
+test "what an earlier window manager remembered is ignored once there are windows" {
+    const os = boot("");
+    os.monitors_set(1);
+    const zed = os.app_launch("Zed", "dev.zed.Zed");
+    const a = open(os, zed, .{});
+    os.settle();
+    const before = engine.revision;
+    const memory = [_]engine_module.WorkspaceMemory{
+        .{ .workspace = 4, .display = 1, .shown = true },
+    };
+    os.remember(&memory);
+    os.settle();
+    try testing.expectEqual(before, engine.revision);
+    try testing.expectEqual(@as(u8, 0), engine.window_find(a).?.workspace);
+    // A window that is not adopted never takes a workspace from a file.
+    const b = open(os, zed, .{ .left_on = 9 });
+    os.settle();
+    try testing.expectEqual(@as(u8, 0), engine.window_find(b).?.workspace);
+}

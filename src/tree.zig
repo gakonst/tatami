@@ -111,6 +111,36 @@ pub const Forest = struct {
         return current;
     }
 
+    fn depth(forest: *const Forest, index: NodeIndex) u32 {
+        var current = index;
+        var steps: u32 = 0;
+        while (forest.nodes[current].parent != node_none) : (steps += 1) {
+            assert(steps < nodes_max);
+            current = forest.nodes[current].parent;
+        }
+        return steps;
+    }
+
+    /// The root of the smallest subtree that holds both nodes, which are in one tree.
+    pub fn ancestor_common(forest: *const Forest, a: NodeIndex, b: NodeIndex) NodeIndex {
+        var first = a;
+        var second = b;
+        var depth_first = forest.depth(first);
+        var depth_second = forest.depth(second);
+        while (depth_first > depth_second) : (depth_first -= 1) {
+            first = forest.nodes[first].parent;
+        }
+        while (depth_second > depth_first) : (depth_second -= 1) {
+            second = forest.nodes[second].parent;
+        }
+        while (first != second) : (depth_first -= 1) {
+            assert(depth_first > 0);
+            first = forest.nodes[first].parent;
+            second = forest.nodes[second].parent;
+        }
+        return first;
+    }
+
     /// Next node of the tree in preorder, or node_none after the last one.
     pub fn next(forest: *const Forest, root: NodeIndex, index: NodeIndex) NodeIndex {
         assert(forest.nodes[index].in_use);
@@ -554,6 +584,27 @@ test "remove promotes the sibling and frees both nodes" {
     forest.remove(&root, 3);
     try testing.expectEqual(node_none, root);
     try testing.expectEqual(nodes_max, forest.free_count);
+}
+
+test "the smallest subtree that holds two windows" {
+    var forest = test_forest();
+    var root: NodeIndex = node_none;
+    const screen = Rect.init(0, 0, 1600, 1000);
+    forest.insert(&root, node_none, 1, .auto);
+    forest.layout(root, screen, 0);
+    forest.insert(&root, forest.leaf_find(1), 2, .auto);
+    forest.layout(root, screen, 0);
+    forest.insert(&root, forest.leaf_find(2), 3, .auto);
+    forest.layout(root, screen, 0);
+    // 1 beside the split that holds 2 above 3.
+    const one = forest.leaf_find(1);
+    const two = forest.leaf_find(2);
+    const three = forest.leaf_find(3);
+    try testing.expectEqual(one, forest.ancestor_common(one, one));
+    try testing.expectEqual(forest.nodes[two].parent, forest.ancestor_common(two, three));
+    try testing.expectEqual(forest.nodes[two].parent, forest.ancestor_common(three, two));
+    try testing.expectEqual(root, forest.ancestor_common(one, three));
+    try testing.expectEqual(root, forest.ancestor_common(root, three));
 }
 
 test "gaps, placement by side, rotate and mirror" {

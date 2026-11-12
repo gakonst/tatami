@@ -187,6 +187,8 @@ pub const Text = struct {
 };
 
 /// The length of the UTF-8 sequence that starts the bytes, or 0 when they start with none.
+/// A sequence that is longer than it needs to be, that encodes a surrogate or that lies
+/// past the last code point is none either: a strict reader of JSON refuses them all.
 fn utf8_len(bytes: []const u8) usize {
     assert(bytes.len > 0);
     const lead = bytes[0];
@@ -199,6 +201,11 @@ fn utf8_len(bytes: []const u8) usize {
     for (bytes[1..len]) |byte| {
         if (byte & 0xc0 != 0x80) return 0;
     }
+    const second = bytes[1];
+    if (lead == 0xe0 and second < 0xa0) return 0;
+    if (lead == 0xed and second > 0x9f) return 0;
+    if (lead == 0xf0 and second < 0x90) return 0;
+    if (lead == 0xf4 and second > 0x8f) return 0;
     return len;
 }
 
@@ -234,5 +241,20 @@ test "text helpers" {
     var json = Text.init(&wide);
     json.json_string("a\"b\\c\td\x01 \xc3\xa9 \xe2\x82");
     try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\td\\u0001 \xc3\xa9 ??\"", json.slice());
+    try std.testing.expect(!json.truncated);
+}
+
+test "a JSON string holds only well-formed UTF-8, whatever the bytes were" {
+    var buffer: [128]u8 = undefined;
+    var json = Text.init(&buffer);
+    // The longest and shortest of each length stay; an overlong form, a surrogate and a
+    // sequence past U+10FFFF become question marks, one for each byte.
+    json.json_string("\xe0\xa0\x80 \xed\x9f\xbf \xf0\x90\x80\x80 \xf4\x8f\xbf\xbf");
+    json.json_string("\xe0\x9f\xbf \xed\xa0\x80 \xf0\x8f\xbf\xbf \xf4\x90\x80\x80 \xc0\xaf");
+    try std.testing.expectEqualStrings(
+        "\"\xe0\xa0\x80 \xed\x9f\xbf \xf0\x90\x80\x80 \xf4\x8f\xbf\xbf\"" ++
+            "\"??? ??? ???? ???? ??\"",
+        json.slice(),
+    );
     try std.testing.expect(!json.truncated);
 }

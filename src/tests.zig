@@ -8,4 +8,13 @@ test {
     _ = @import("engine.zig");
     _ = @import("sim.zig");
     _ = @import("scenarios.zig");
+    _ = @import("scenarios_yabai.zig");
+    _ = @import("scenarios_macapps.zig");
+    _ = @import("state.zig");
+    _ = @import("scenarios_aerospace.zig");
+    _ = @import("scenarios_i3.zig");
+    _ = @import("scenarios_fuzz.zig");
+    _ = @import("scenarios_review.zig");
+    _ = @import("scenarios_hostile.zig");
+    _ = @import("scenarios_restart.zig");
 }

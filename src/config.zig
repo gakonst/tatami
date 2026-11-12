@@ -15,6 +15,11 @@ pub const commands_per_binding_max = 4;
 pub const gap_max = 200;
 /// Binding modes, including main.
 pub const modes_max = 8;
+
+comptime {
+    // A set of modes is kept as the bits of one byte.
+    assert(modes_max <= 8);
+}
 pub const mode_name_max = 16;
 
 pub const default_source = @embedFile("default.conf");
@@ -93,7 +98,50 @@ const keys = [_]Key{
     .{ .name = "f7", .code = 98 },          .{ .name = "f8", .code = 100 },
     .{ .name = "f9", .code = 101 },         .{ .name = "f10", .code = 109 },
     .{ .name = "f11", .code = 103 },        .{ .name = "f12", .code = 111 },
+    .{ .name = "f13", .code = 105 },        .{ .name = "f14", .code = 107 },
+    .{ .name = "f15", .code = 113 },        .{ .name = "f16", .code = 106 },
+    .{ .name = "f17", .code = 64 },         .{ .name = "f18", .code = 79 },
+    .{ .name = "f19", .code = 80 },         .{ .name = "f20", .code = 90 },
+    .{ .name = "home", .code = 115 },       .{ .name = "end", .code = 119 },
+    .{ .name = "pageup", .code = 116 },     .{ .name = "pagedown", .code = 121 },
+    .{ .name = "delete", .code = 117 },     .{ .name = "section", .code = 10 },
+    .{ .name = "kp0", .code = 82 },         .{ .name = "kp1", .code = 83 },
+    .{ .name = "kp2", .code = 84 },         .{ .name = "kp3", .code = 85 },
+    .{ .name = "kp4", .code = 86 },         .{ .name = "kp5", .code = 87 },
+    .{ .name = "kp6", .code = 88 },         .{ .name = "kp7", .code = 89 },
+    .{ .name = "kp8", .code = 91 },         .{ .name = "kp9", .code = 92 },
+    .{ .name = "kpdecimal", .code = 65 },   .{ .name = "kpmultiply", .code = 67 },
+    .{ .name = "kpplus", .code = 69 },      .{ .name = "kpclear", .code = 71 },
+    .{ .name = "kpdivide", .code = 75 },    .{ .name = "kpenter", .code = 76 },
+    .{ .name = "kpminus", .code = 78 },     .{ .name = "kpequal", .code = 81 },
+    // Other names for keys above. key_name answers with the first name of a code.
+    .{ .name = "return", .code = 36 },      .{ .name = "escape", .code = 53 },
+    .{ .name = "grave", .code = 50 },
 };
+
+/// The largest key code a keyboard sends; a code written as a number may not be larger.
+const keycode_max: u16 = 0x7f;
+
+/// The code of a key given by name, or as a number such as 0x32 for a key with no name.
+fn key_code(text: []const u8) ?u16 {
+    for (keys) |key| {
+        if (std.mem.eql(u8, key.name, text)) return key.code;
+    }
+    if (!std.mem.startsWith(u8, text, "0x") or text.len < 3 or text.len > 4) return null;
+    const code = std.fmt.parseUnsigned(u16, text[2..], 16) catch return null;
+    return if (code <= keycode_max) code else null;
+}
+
+/// Writes a binding's keys the way the configuration file spells them.
+pub fn chord_print(text: *stdx.Text, binding: *const Binding) void {
+    if (binding.modifiers.cmd) text.append("cmd-");
+    if (binding.modifiers.ctrl) text.append("ctrl-");
+    if (binding.modifiers.alt) text.append("alt-");
+    if (binding.modifiers.shift) text.append("shift-");
+    const name = key_name(binding.keycode);
+    if (name.len > 1 or name[0] != '?') return text.append(name);
+    text.print("0x{x:0>2}", .{binding.keycode});
+}
 
 pub fn key_name(code: u16) []const u8 {
     for (keys) |key| {
@@ -116,6 +164,7 @@ const LineError = error{
     BadAction,
     BadMode,
     TooManyModes,
+    ReloadNotAlone,
 } || command.ParseError;
 
 pub const Config = struct {
@@ -163,32 +212,50 @@ pub const Config = struct {
         return config.modes_count - 1;
     }
 
-    /// Every mode command names a mode that has bindings, and every mode but main has a
-    /// binding that leaves it, so no key press can strand the user in a mode.
-    fn modes_check(config: *const Config, diagnostics: *stdx.Text) bool {
+    /// For every mode, the modes that its bindings switch to, one bit each. Of the mode
+    /// commands of one binding the last is the one that takes effect. False when a mode
+    /// command names a mode that has no bindings.
+    fn modes_leads(config: *const Config, leads: *[modes_max]u8, diagnostics: *stdx.Text) bool {
         var ok = true;
-        var exits: [modes_max]bool = @splat(false);
-        exits[0] = true;
         for (config.bindings[0..config.bindings_count]) |*binding| {
+            var target: ?u8 = null;
             for (binding.commands[0..binding.commands_count]) |cmd| {
                 if (cmd != .mode) continue;
                 const name = config.strings.get(cmd.mode);
-                const target = config.mode_find(name);
-                if (target == null) {
-                    ok = false;
-                    diagnostics.print("mode \"{s}\" has no bindings\n", .{name});
-                } else if (target.? != binding.mode) {
-                    exits[binding.mode] = true;
-                }
+                target = config.mode_find(name);
+                if (target != null) continue;
+                ok = false;
+                // A name longer than a mode's can be is cut, so the report holds it.
+                const shown = name[0..@min(name.len, mode_name_max + 1)];
+                diagnostics.print("mode \"{s}\" has no bindings\n", .{shown});
+            }
+            if (target) |mode| leads[binding.mode] |= @as(u8, 1) << @intCast(mode);
+        }
+        return ok;
+    }
+
+    /// Every mode command names a mode that has bindings, and from every mode some keys
+    /// lead back to main, so no key press can strand the user in a mode or in a ring of
+    /// modes.
+    fn modes_check(config: *const Config, diagnostics: *stdx.Text) bool {
+        var leads: [modes_max]u8 = @splat(0);
+        var ok = config.modes_leads(&leads, diagnostics);
+        // The modes known to lead to main, one bit each. Main is there already.
+        var home: u8 = 1;
+        var round: u8 = 1;
+        while (round < config.modes_count) : (round += 1) {
+            for (leads[0..config.modes_count], 0..) |targets, mode| {
+                if (targets & home != 0) home |= @as(u8, 1) << @intCast(mode);
             }
         }
         var mode: u8 = 1;
         while (mode < config.modes_count) : (mode += 1) {
-            if (exits[mode]) continue;
+            const own = @as(u8, 1) << @intCast(mode);
+            if (home & own != 0) continue;
             ok = false;
-            diagnostics.print("mode \"{s}\" has no binding that leaves it\n", .{
-                config.mode_name(mode),
-            });
+            const stuck = leads[mode] & ~own == 0;
+            const what = if (stuck) "no binding that leaves it" else "no way back to main";
+            diagnostics.print("mode \"{s}\" has {s}\n", .{ config.mode_name(mode), what });
         }
         return ok;
     }
@@ -206,7 +273,13 @@ pub const Config = struct {
             if (line.len == 0 or line[0] == '#') continue;
             config.load_line(line) catch |err| {
                 ok = false;
-                diagnostics.print("line {d}: {s}: {s}\n", .{ line_number, @errorName(err), line });
+                // Only the start of a long line: all of it may be more than a report
+                // holds, and a line that does not fit would not be reported at all.
+                const shown = line[0..@min(line.len, 120)];
+                const more = if (shown.len < line.len) "..." else "";
+                diagnostics.print("line {d}: {s}: {s}{s}\n", .{
+                    line_number, @errorName(err), shown, more,
+                });
             };
         }
         if (!config.modes_check(diagnostics)) ok = false;
@@ -275,6 +348,11 @@ pub const Config = struct {
             binding.commands_count += 1;
         }
         assert(binding.commands_count > 0);
+        // A reload replaces the configuration that the other commands of the binding,
+        // and the mode they switch to, were read from: it is a binding of its own.
+        for (binding.commands[0..binding.commands_count]) |cmd| {
+            if (cmd == .reload and binding.commands_count > 1) return error.ReloadNotAlone;
+        }
         binding.keys = try config.strings.add(chord);
         binding.source = try config.strings.add(command.trim(rest[colon + 1 ..]));
         if (config.bindings_count == bindings_max) return error.TooManyBindings;
@@ -412,13 +490,8 @@ fn parse_chord(text: []const u8, binding: *Binding) LineError!void {
     while (parts.next()) |part| {
         if (key_found) return error.BadKey;
         if (parts.peek() == null) {
-            for (keys) |key| {
-                if (std.mem.eql(u8, key.name, part)) {
-                    binding.keycode = key.code;
-                    key_found = true;
-                }
-            }
-            if (!key_found) return error.BadKey;
+            binding.keycode = key_code(part) orelse return error.BadKey;
+            key_found = true;
         } else if (std.mem.eql(u8, part, "cmd")) {
             binding.modifiers.cmd = true;
         } else if (std.mem.eql(u8, part, "alt") or std.mem.eql(u8, part, "option")) {
@@ -485,6 +558,24 @@ test "a bad file reports every bad line and loads nothing partially" {
     try testing.expect(std.mem.indexOf(u8, report, "line 1:") == null);
 }
 
+test "a binding that reloads the configuration does nothing else" {
+    var config: Config = undefined;
+    var buffer: [1024]u8 = undefined;
+    var diagnostics = stdx.Text.init(&buffer);
+    const source =
+        \\bind alt-r : reload
+        \\bind alt-s : reload ; exec open -a Ghostty
+        \\bind alt-t : mode main ; reload
+        \\bind alt-u : quit ; balance
+    ;
+    try testing.expect(!config.load(source, &diagnostics));
+    const report = diagnostics.slice();
+    try testing.expect(std.mem.indexOf(u8, report, "line 1:") == null);
+    try testing.expect(std.mem.indexOf(u8, report, "line 2: ReloadNotAlone") != null);
+    try testing.expect(std.mem.indexOf(u8, report, "line 3: ReloadNotAlone") != null);
+    try testing.expect(std.mem.indexOf(u8, report, "line 4:") == null);
+}
+
 test "binding modes: a chord may repeat across modes, and no mode can strand the user" {
     var config: Config = undefined;
     var buffer: [1024]u8 = undefined;
@@ -517,4 +608,64 @@ test "binding modes: a chord may repeat across modes, and no mode can strand the
     try testing.expect(std.mem.indexOf(u8, report, "mode \"nowhere\" has no bindings") != null);
     const stuck = "\"resize\" has no binding that leaves";
     try testing.expect(std.mem.indexOf(u8, report, stuck) != null);
+
+    // Two modes that only lead to each other strand the user as well, and so does a
+    // binding that leaves a mode and returns to it at once: the last mode command of a
+    // binding is the one that counts.
+    diagnostics = stdx.Text.init(&buffer);
+    const ring =
+        \\bind alt-r : mode north
+        \\bind mode:north j : mode south
+        \\bind mode:south k : mode north
+        \\bind alt-s : mode loop
+        \\bind mode:loop esc : mode main ; mode loop
+        \\bind alt-t : mode far
+        \\bind mode:far j : mode near
+        \\bind mode:near esc : balance ; mode main
+    ;
+    try testing.expect(!config.load(ring, &diagnostics));
+    const ringed = diagnostics.slice();
+    try testing.expect(std.mem.indexOf(u8, ringed, "\"north\" has no way back to main") != null);
+    try testing.expect(std.mem.indexOf(u8, ringed, "\"south\" has no way back to main") != null);
+    try testing.expect(std.mem.indexOf(u8, ringed, "\"loop\" has no binding that leaves") != null);
+    try testing.expect(std.mem.indexOf(u8, ringed, "\"far\"") == null);
+    try testing.expect(std.mem.indexOf(u8, ringed, "\"near\"") == null);
+}
+
+test "keys have the names people expect, and any key can be named by its code" {
+    var binding: Binding = undefined;
+    try parse_chord("alt-return", &binding);
+    try testing.expectEqual(@as(u16, 36), binding.keycode);
+    try parse_chord("cmd-shift-pagedown", &binding);
+    try testing.expectEqual(@as(u16, 121), binding.keycode);
+    try parse_chord("ctrl-kp5", &binding);
+    try testing.expectEqual(@as(u16, 87), binding.keycode);
+    try parse_chord("alt-0x32", &binding);
+    try testing.expectEqual(@as(u16, 0x32), binding.keycode);
+    try testing.expect(binding.modifiers.alt and !binding.modifiers.cmd);
+    try testing.expectError(error.BadKey, parse_chord("alt-0x80", &binding));
+    try testing.expectError(error.BadKey, parse_chord("alt-0x", &binding));
+    try testing.expectError(error.BadKey, parse_chord("alt-0xzz", &binding));
+    try testing.expectError(error.BadKey, parse_chord("alt-hyper", &binding));
+    // Every name is one key, and a code is printed under its first name.
+    for (keys, 0..) |key, index| {
+        for (keys[index + 1 ..]) |other| try testing.expect(!std.mem.eql(u8, key.name, other.name));
+    }
+    try testing.expectEqualStrings("enter", key_name(36));
+    try testing.expectEqualStrings("esc", key_name(53));
+}
+
+test "a bad line that is very long is still reported, by its start" {
+    var config: Config = undefined;
+    var buffer: [1024]u8 = undefined;
+    var diagnostics = stdx.Text.init(&buffer);
+    const filler: [4000]u8 = @splat('x');
+    const source = "gap inner 4\nbind cmd-h : focus " ++ filler ++ "\nbind cmd-h1 : focus west\n";
+    try testing.expect(!config.load(source, &diagnostics));
+    const report = diagnostics.slice();
+    const start = "line 2: BadArgument: bind cmd-h : focus xxx";
+    try testing.expect(std.mem.startsWith(u8, report, start));
+    try testing.expect(std.mem.indexOf(u8, report, "xxx...\nline 3: BadKey") != null);
+    try testing.expect(report.len < 300);
+    try testing.expect(!diagnostics.truncated);
 }

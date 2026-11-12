@@ -35,7 +35,9 @@ pub const effects_max: u32 = 1024;
 pub const focus_pending_max: u32 = 8;
 pub const title_max: u32 = 96;
 pub const name_max: u32 = 64;
-pub const reply_max: u32 = 32 * 1024;
+/// Holds the longest answer there is: every window as JSON, 700 bytes each when the
+/// title and the names are nothing but quotes. The shell's own buffer must hold it too.
+pub const reply_max: u32 = 256 * 1024;
 
 /// Retries after a frame did not take. Applications with a minimum size never comply.
 pub const attempts_max: u8 = 2;
@@ -51,10 +53,16 @@ pub const quiet_ms: u64 = 1500;
 /// After the focused window goes away, focus may not jump to a hidden workspace.
 pub const guard_ms: u64 = 400;
 pub const focus_pending_ms: u64 = 500;
+/// How long a floating window that left native fullscreen is given to be back at the
+/// frame it had before: the animation takes about a second.
+pub const fullscreen_exit_ms: u64 = 1500;
 /// The most a parked window may be lifted; beyond this something else is going on.
 pub const park_lift_max: i32 = 256;
 pub const backoff_min_ms: u32 = 250;
 pub const backoff_max_ms: u32 = 8000;
+/// The furthest one command moves a floating window: more than any desk of displays is
+/// wide, and little enough that the sums stay far from the end of the numbers.
+pub const nudge_max: i32 = 1 << 20;
 
 const workspace_none: u8 = std.math.maxInt(u8);
 
@@ -91,6 +99,68 @@ pub const WindowInfo = struct {
     tab_of: WindowId = 0,
     /// The window was already open when the window manager started.
     adopted: bool = false,
+    /// The workspace on which the window manager that ran before this one left the
+    /// window, when that is known. Only looked at for adopted windows.
+    workspace: ?u8 = null,
+};
+
+/// What the window manager that ran before this one knew about a workspace. None of it
+/// is trusted: the file it comes from may be old, cut short or about other displays.
+pub const WorkspaceMemory = struct {
+    workspace: u8,
+    /// The display it belonged to, there or not.
+    display: u32,
+    /// A display was showing it.
+    shown: bool,
+    /// It was the workspace in use.
+    focused: bool = false,
+    /// It was the workspace in use before that one.
+    recent: bool = false,
+    /// Its gaps were toggled.
+    gaps: bool = false,
+    label: command.Label = .{},
+};
+
+/// What the window manager that ran before this one knew about a window. Every field
+/// but the label is a number or a flag, and none is trusted.
+pub const WindowMemory = struct {
+    id: WindowId,
+    /// The process that owned the window. An id that now belongs to another process is
+    /// another window, and nothing here is about it.
+    pid: i32,
+    workspace: u8,
+    floating: bool = false,
+    /// The user chose the mode by hand.
+    by_user: bool = false,
+    auto_floated: bool = false,
+    sticky: bool = false,
+    ignored: bool = false,
+    /// It was a native tab of another window: only its workspace is taken.
+    tab: bool = false,
+    /// It had the focus.
+    focused: bool = false,
+    /// 0 none, 1 parent, 2 fullscreen.
+    zoom: u8 = 0,
+    /// Larger had the focus more recently; 0 never had it.
+    focus_order: u32 = 0,
+    /// Where the window lives while it floats. An empty rect is not known.
+    float_rect: Rect = Rect.zero,
+    /// Its place among the tiles of its workspace in layout order, counting from 1; 0 when
+    /// it was not in the layout.
+    order: u16 = 0,
+    /// For a tile, how it joins the tiles before it: the first and the last window of
+    /// the part of the layout that it splits, the new tile below (side 1) or to the
+    /// right (side 3), at this ratio. For a window that left the layout for a while,
+    /// the place it returns to, as the engine keeps it: the two ends of what it sat
+    /// beside, on side 0 west, 1 south, 2 north or 3 east.
+    beside: WindowId = 0,
+    beside_last: WindowId = 0,
+    side: u8 = 3,
+    ratio: u32 = tree.ratio_half,
+    /// For a window that left the layout for a while: larger left more recently. The
+    /// ones that left after it come back first, to make the layout the one it left.
+    left_order: u32 = 0,
+    label: command.Label = .{},
 };
 
 pub const Event = union(enum) {
@@ -117,6 +187,13 @@ pub const Event = union(enum) {
     /// The shell reports every window that is already open, as at startup, between begin
     /// and end. Nothing is arranged in between: one layout at the end, not one per window.
     adoption: Adoption,
+    /// What a window manager that just quit left behind, so that a restart changes
+    /// nothing. Sent before the windows are reported; ignored once there are windows.
+    workspaces_remembered: []const WorkspaceMemory,
+    /// What it knew about its windows, sent just before workspaces_remembered. A window
+    /// that is then reported as already open, with the same id and process, is as it
+    /// was left.
+    windows_remembered: []const WindowMemory,
     tick,
 };
 
@@ -179,6 +256,9 @@ pub const Window = struct {
     desired_valid: bool = false,
     /// Where the window lives while floating on a visible workspace.
     float_rect: Rect = Rect.zero,
+    /// Until when the window is left alone because it is on its way back from native
+    /// fullscreen, 0 when it is not.
+    float_return_until_ms: u64 = 0,
     attempts: u8 = 0,
     set_pending: bool = false,
     frozen: bool = false,
@@ -188,15 +268,30 @@ pub const Window = struct {
     rules_applied: u64 = 0,
     appeared_ms: u64 = 0,
     quiet_until_ms: u64 = 0,
+    /// A rule chose the workspace of the window.
+    rule_placed: bool = false,
     focus_seq: u64 = 0,
     sets_total: u32 = 0,
     /// How far above the parking spot macOS insists on keeping this window (see lifted).
     park_lift: i32 = 0,
     /// A name given with the label command, to address the window in later commands.
     label: command.Label = .{},
+    /// The place in the layout that a minimized or native fullscreen window left, so that
+    /// it returns there: the first and the last window of the subtree it sat beside (0
+    /// when none), the side it was on and the ratio.
+    slot_beside: WindowId = 0,
+    /// When the window left, among the windows that did: 0 when it remembers no place.
+    slot_seq: u64 = 0,
+    slot_beside_last: WindowId = 0,
+    slot_side: Direction = .west,
+    slot_ratio: u32 = tree.ratio_half,
 
     pub fn title_slice(window: *const Window) []const u8 {
         return window.title[0..window.title_len];
+    }
+
+    fn title_set(window: *Window, title: []const u8) void {
+        window.title_len = text_keep(&window.title, title);
     }
 
     /// Windows in the layout are exactly the windows that own a leaf in their workspace tree.
@@ -210,10 +305,29 @@ pub const Window = struct {
         return !window.ignored and !window.minimized and !window.fullscreen and window.tab_of == 0;
     }
 
+    /// True for a tile of the workspace that is out of its layout for a while and
+    /// remembers the place it left.
+    fn slot_waits(window: *const Window, workspace: u8) bool {
+        if (window.workspace != workspace or window.mode != .tiled) return false;
+        if (window.ignored or window.tab_of != 0 or window.slot_seq == 0) return false;
+        return window.minimized or window.fullscreen;
+    }
+
     pub fn focusable(window: *const Window) bool {
         return !window.ignored and !window.minimized and window.tab_of == 0;
     }
 };
+
+/// Keeps as much of a title or a name as fits, with its control characters turned into
+/// spaces: a line break in one would break the one line per window that queries answer
+/// with. Returns the length kept.
+fn text_keep(target: []u8, text: []const u8) u8 {
+    const len = stdx.copy_truncate(target, text);
+    for (target[0..len]) |*byte| {
+        if (byte.* < 0x20 or byte.* == 0x7f) byte.* = ' ';
+    }
+    return @intCast(len);
+}
 
 pub const App = struct {
     pid: i32 = 0,
@@ -244,6 +358,9 @@ pub const Workspace = struct {
     insert_percent: u8 = 0,
     gaps_toggled: bool = false,
     label: command.Label = .{},
+    /// The display change before which this workspace was last seen showing on a monitor,
+    /// 0 for never. A display that comes back shows what it showed when it went away.
+    shown_seq: u64 = 0,
 };
 
 pub const Monitor = struct {
@@ -255,6 +372,13 @@ pub const Monitor = struct {
 };
 
 const FocusPending = struct { id: WindowId, deadline_ms: u64 };
+
+const Slot = struct {
+    beside: WindowId = 0,
+    beside_last: WindowId = 0,
+    side: Direction = .west,
+    ratio: u32 = tree.ratio_half,
+};
 
 pub const Stats = struct {
     events: u64 = 0,
@@ -277,6 +401,13 @@ pub const Engine = struct {
     workspaces: [workspaces_max]Workspace,
     monitors: [monitors_max]Monitor,
     monitors_count: u32,
+    /// How many monitors there were when every display went to sleep, else 0. Their
+    /// entries are kept to compare with the displays that wake up.
+    monitors_asleep: u32,
+    /// Counts the display changes, to tell which workspace a display showed last.
+    shown_seq: u64,
+    /// Counts the windows that leave the layout for a while, to tell in which order.
+    slot_seq: u64,
     focused_window: WindowId,
     focused_monitor: u8,
     recent_monitor: u8,
@@ -293,6 +424,13 @@ pub const Engine = struct {
     stopped: bool,
     /// Between adoption begin and end. Frames are not sent meanwhile.
     adopting: bool,
+    /// What the last window manager knew of windows that were not reported yet, or whose
+    /// adoption is still going on. No id is in it twice.
+    memories: [windows_max]WindowMemory,
+    memories_count: u32,
+    /// From the moment it is taken over until the adoption ends. Meanwhile a workspace
+    /// that windows were left on is not empty, though none of them was reported yet.
+    memories_fresh: bool,
     now_ms: u64,
     effects: [effects_max]Effect,
     effects_count: u32,
@@ -312,6 +450,9 @@ pub const Engine = struct {
         for (&engine.apps) |*app| app.* = .{};
         for (&engine.workspaces) |*workspace| workspace.* = .{};
         engine.monitors_count = 0;
+        engine.monitors_asleep = 0;
+        engine.shown_seq = 0;
+        engine.slot_seq = 0;
         engine.focused_window = 0;
         engine.focused_monitor = 0;
         engine.recent_monitor = 0;
@@ -323,6 +464,8 @@ pub const Engine = struct {
         engine.focus_stale = false;
         engine.stopped = false;
         engine.adopting = false;
+        engine.memories_count = 0;
+        engine.memories_fresh = false;
         engine.now_ms = 0;
         engine.effects_count = 0;
         engine.reply_len = 0;
@@ -372,6 +515,8 @@ pub const Engine = struct {
             .window_focused => |id| engine.focus_observe(id, false),
             .focus_reported => |id| engine.focus_observe(id, true),
             .command => |cmd| engine.on_command(cmd),
+            .workspaces_remembered => |list| engine.on_workspaces_remembered(list),
+            .windows_remembered => |list| engine.on_windows_remembered(list),
             .adoption => |phase| engine.on_adoption(phase),
             .tick => engine.on_tick(),
         }
@@ -454,6 +599,9 @@ pub const Engine = struct {
         for (&engine.windows) |*window| {
             if (window.id == 0) continue;
             if (window.recheck_at_ms != 0) deadline = min_deadline(deadline, window.recheck_at_ms);
+            if (window.float_return_until_ms != 0) {
+                deadline = min_deadline(deadline, window.float_return_until_ms);
+            }
             // Frames held back during adoption wait for its end, not for a time.
             if (window.set_pending and !engine.adopting) {
                 deadline = min_deadline(deadline, engine.apps[window.app].suspended_until_ms);
@@ -519,6 +667,10 @@ pub const Engine = struct {
         for (&engine.windows) |*window| {
             if (window.id != 0 and window.workspace == workspace and !window.sticky) return false;
         }
+        if (!engine.memories_fresh) return true;
+        for (engine.memories[0..engine.memories_count]) |*memory| {
+            if (memory.workspace == workspace and !memory.sticky) return false;
+        }
         return true;
     }
 
@@ -556,20 +708,27 @@ pub const Engine = struct {
 
     // Monitors and workspaces.
 
-    fn on_monitors_changed(engine: *Engine, list: []const MonitorInfo) void {
-        assert(list.len <= monitors_max);
+    fn on_monitors_changed(engine: *Engine, reported: []const MonitorInfo) void {
+        // More displays than are followed: the ones past the limit are left alone.
+        const list = reported[0..@min(reported.len, monitors_max)];
+        engine.shown_remember();
         if (list.len == 0) {
             // Every display is asleep. Keep all state; it comes back with the displays.
+            if (engine.monitors_count > 0) engine.monitors_asleep = engine.monitors_count;
             engine.monitors_count = 0;
             return;
         }
-        const old = engine.monitors;
-        const old_count = engine.monitors_count;
-        const focused_display = if (old_count > 0) old[engine.focused_monitor].display else 0;
-        const recent_display = if (old_count > 0) old[engine.recent_monitor].display else 0;
+        var old = engine.monitors;
+        // Displays that wake up are compared with the ones that went to sleep.
+        const awake = engine.monitors_count > 0;
+        const old_count = if (awake) engine.monitors_count else engine.monitors_asleep;
+        engine.monitors_asleep = 0;
         engine.monitors_count = 0;
         for (list) |info| engine.monitor_insert_sorted(info);
         assert(engine.monitors_count == list.len);
+        engine.displays_renumber(old[0..old_count]);
+        const focused_display = if (old_count > 0) old[engine.focused_monitor].display else 0;
+        const recent_display = if (old_count > 0) old[engine.recent_monitor].display else 0;
         // Monitors keep the workspace they were showing when that is still theirs.
         for (engine.monitors[0..engine.monitors_count], 0..) |*monitor, index| {
             for (old[0..old_count]) |*previous| {
@@ -578,6 +737,18 @@ pub const Engine = struct {
                     monitor.workspace = previous.workspace;
                 }
             }
+        }
+        // The first displays there are show what a window manager before this one left
+        // showing, if it left word while every display was asleep.
+        if (old_count == 0) engine.shown_restore();
+        const main = engine.main_monitor();
+        const taken = engine.monitors[main].workspace != workspace_none or
+            engine.workspace_shown_anywhere(0);
+        if (old_count == 0 and !taken and !engine.workspace_empty(0)) {
+            // Windows that were reported before any display was known wait on the first
+            // workspace, the one in use until then. The main display shows it.
+            engine.workspaces[0].display = engine.monitors[main].display;
+            engine.monitors[main].workspace = 0;
         }
         for (engine.monitors[0..engine.monitors_count], 0..) |*monitor, index| {
             if (monitor.workspace == workspace_none) {
@@ -604,6 +775,309 @@ pub const Engine = struct {
         }
         // Which monitor has focus may have changed under us; ask instead of guessing.
         engine.focus_stale = true;
+    }
+
+    /// A display that is gone, while one that was not there has its frame, is the same
+    /// display under another id: macOS hands out a new one when a display reconnects.
+    /// Its workspaces go with it, instead of falling to the main display as those of a
+    /// display that was unplugged do. The old entries are renamed too, for what follows.
+    fn displays_renumber(engine: *Engine, old: []Monitor) void {
+        for (old, 0..) |*previous, index| {
+            if (display_among(engine.monitors[0..engine.monitors_count], previous.display)) {
+                continue;
+            }
+            for (engine.monitors[0..engine.monitors_count]) |*monitor| {
+                if (!monitor.frame.eql(previous.frame)) continue;
+                // A display that kept its id is not another one's successor.
+                if (display_among(old, monitor.display)) continue;
+                for (&engine.workspaces) |*workspace| {
+                    if (workspace.display == previous.display) workspace.display = monitor.display;
+                }
+                old[index].display = monitor.display;
+                break;
+            }
+        }
+    }
+
+    fn display_among(monitors: []const Monitor, display: u32) bool {
+        for (monitors) |*monitor| {
+            if (monitor.display == display) return true;
+        }
+        return false;
+    }
+
+    /// The workspace an adopted window was on when the last window manager quit.
+    fn workspace_left_on(engine: *const Engine, info: WindowInfo) ?u8 {
+        if (!info.adopted or engine.monitors_count == 0) return null;
+        const workspace = info.workspace orelse return null;
+        return if (workspace < workspaces_max) workspace else null;
+    }
+
+    /// Takes over what the last window manager knew about the workspaces: the display of
+    /// each, the ones that were showing, the one in use. A display that is not there
+    /// keeps its workspaces for when it comes back, as one that is unplugged does.
+    fn on_workspaces_remembered(engine: *Engine, list: []const WorkspaceMemory) void {
+        for (&engine.windows) |*window| {
+            if (window.id != 0) return;
+        }
+        // Newer than anything a display change has noted so far.
+        engine.shown_seq += 1;
+        var current: u8 = workspace_none;
+        for (list) |memory| {
+            if (memory.workspace >= workspaces_max) continue;
+            const workspace = &engine.workspaces[memory.workspace];
+            workspace.display = memory.display;
+            workspace.shown_seq = if (memory.shown) engine.shown_seq else 0;
+            workspace.gaps_toggled = memory.gaps;
+            workspace.label = label_checked(memory.label);
+            if (memory.focused) current = memory.workspace;
+            if (memory.recent) engine.recent_workspace = memory.workspace;
+        }
+        // With every display asleep, the displays that wake up take it from here.
+        if (engine.monitors_count == 0) return;
+        for (engine.monitors[0..engine.monitors_count]) |*monitor| {
+            monitor.workspace = workspace_none;
+        }
+        engine.shown_restore();
+        for (engine.monitors[0..engine.monitors_count], 0..) |*monitor, index| {
+            if (monitor.workspace == workspace_none) {
+                monitor.workspace = engine.workspace_pick(@intCast(index));
+            }
+        }
+        if (current != workspace_none and engine.workspace_visible(current)) {
+            engine.focused_monitor = engine.workspace_monitor(current);
+        }
+    }
+
+    /// Gives the displays that show nothing yet the workspaces that were remembered as
+    /// showing: each on its own display, or on the main one when its own is not there,
+    /// which is where it was showing if it was.
+    fn shown_restore(engine: *Engine) void {
+        if (engine.shown_seq == 0) return;
+        for (&engine.workspaces, 0..) |*workspace, index| {
+            if (workspace.shown_seq != engine.shown_seq) continue;
+            const monitor = &engine.monitors[engine.workspace_monitor(@intCast(index))];
+            if (monitor.workspace == workspace_none) monitor.workspace = @intCast(index);
+        }
+    }
+
+    /// A label from outside is taken only if the label command would have taken it.
+    fn label_checked(label: command.Label) command.Label {
+        if (label.len > command.label_max) return .{};
+        return command.Label.parse(label.slice()) orelse .{};
+    }
+
+    /// Takes over what the last window manager knew about its windows, for the windows
+    /// that are reported next. A window that is already ours is not one of them.
+    fn on_windows_remembered(engine: *Engine, list: []const WindowMemory) void {
+        engine.memories_count = 0;
+        engine.memories_fresh = true;
+        for (list) |entry| {
+            if (engine.memories_count == windows_max) break;
+            const memory = memory_checked(entry) orelse continue;
+            if (engine.window_find(memory.id) != null) continue;
+            if (engine.memory_find(memory.id) != null) continue;
+            engine.memories[engine.memories_count] = memory;
+            engine.memories_count += 1;
+        }
+    }
+
+    /// The entry with everything in range, or nothing when it names no window, process
+    /// or workspace that can be.
+    fn memory_checked(entry: WindowMemory) ?WindowMemory {
+        if (entry.id == 0 or entry.pid == 0 or entry.workspace >= workspaces_max) return null;
+        var memory = entry;
+        memory.label = label_checked(entry.label);
+        if (memory.zoom > 2) memory.zoom = 0;
+        if (memory.side > 3) memory.side = 3;
+        memory.ratio = std.math.clamp(memory.ratio, tree.ratio_min, tree.ratio_max);
+        // A place that arithmetic could overflow on is no place.
+        const rect = memory.float_rect;
+        const far = 1 << 24;
+        const sized = rect.w > 0 and rect.h > 0 and rect.w < far and rect.h < far;
+        const near = rect.x > -far and rect.x < far and rect.y > -far and rect.y < far;
+        if (!sized or !near) memory.float_rect = Rect.zero;
+        if (memory.sticky) memory.floating = true;
+        if (memory.floating or memory.tab) memory.order = 0;
+        if (!memory.floating) memory.auto_floated = false;
+        return memory;
+    }
+
+    fn memory_find(engine: *Engine, id: WindowId) ?*WindowMemory {
+        for (engine.memories[0..engine.memories_count]) |*memory| {
+            if (memory.id == id) return memory;
+        }
+        return null;
+    }
+
+    fn memory_drop(engine: *Engine, id: WindowId) void {
+        const memory = engine.memory_find(id) orelse return;
+        engine.memories_count -= 1;
+        memory.* = engine.memories[engine.memories_count];
+    }
+
+    /// What is remembered of a window that is reported now. Only a window that was
+    /// already open can be remembered, and only by the process that owned it then.
+    fn memory_take(engine: *Engine, info: WindowInfo) ?WindowMemory {
+        const memory = engine.memory_find(info.id) orelse return null;
+        const found = memory.*;
+        const ours = info.adopted and found.pid == info.pid;
+        // Kept while the adoption goes on: the layout is rebuilt from it at the end.
+        if (!ours or !engine.adopting) engine.memory_drop(info.id);
+        return if (ours) found else null;
+    }
+
+    /// The displays there are, or the ones that went to sleep.
+    fn monitors_known(engine: *const Engine) []const Monitor {
+        const awake = engine.monitors_count > 0;
+        return engine.monitors[0..if (awake) engine.monitors_count else engine.monitors_asleep];
+    }
+
+    /// What to write down about the workspaces for the window manager that runs next,
+    /// which gets it back as workspaces_remembered. Returns how many entries there are.
+    pub fn workspaces_remember(
+        engine: *const Engine,
+        out: *[workspaces_max]WorkspaceMemory,
+    ) u32 {
+        const known = engine.monitors_known();
+        for (out, &engine.workspaces, 0..) |*memory, *workspace, index| {
+            var shown = false;
+            for (known) |*monitor| {
+                if (monitor.workspace == index) shown = true;
+            }
+            memory.* = .{
+                .workspace = @intCast(index),
+                .display = workspace.display,
+                .shown = shown,
+                .focused = known.len > 0 and index == engine.workspace_current(),
+                .recent = index == engine.recent_workspace,
+                .gaps = workspace.gaps_toggled,
+                .label = workspace.label,
+            };
+        }
+        return workspaces_max;
+    }
+
+    /// What to write down about the windows for the window manager that runs next, which
+    /// gets it back as windows_remembered. Returns how many entries there are. Windows
+    /// that were remembered and not reported yet are not among them: whoever read the
+    /// file they were in still has their lines.
+    pub fn windows_remember(engine: *const Engine, out: *[windows_max]WindowMemory) u32 {
+        var count: u32 = 0;
+        for (&engine.windows) |*window| {
+            if (window.id == 0) continue;
+            out[count] = engine.window_memory(window);
+            count += 1;
+            if (!engine.adopting) continue;
+            // While the windows are still being reported the layout is not rebuilt yet,
+            // and what was remembered of a window is still all there is to say.
+            for (engine.memories[0..engine.memories_count]) |*memory| {
+                if (memory.id == window.id) out[count - 1] = memory.*;
+            }
+        }
+        return count;
+    }
+
+    fn window_memory(engine: *const Engine, window: *const Window) WindowMemory {
+        var memory: WindowMemory = .{
+            .id = window.id,
+            .pid = window.pid,
+            .workspace = window.workspace,
+            .floating = window.mode == .floating,
+            .by_user = window.mode_by_user,
+            .auto_floated = window.auto_floated,
+            .sticky = window.sticky,
+            .ignored = window.ignored,
+            .tab = window.tab_of != 0,
+            .focused = window.id == engine.focused_window,
+            .zoom = @backingInt(window.zoom),
+            .focus_order = engine.focus_rank(window),
+            .float_rect = window.float_rect,
+            .label = window.label,
+        };
+        const leaf = engine.forest.leaf_find(window.id);
+        if (leaf != node_none) {
+            engine.tile_memory(leaf, &memory);
+        } else if (window.slot_seq != 0) {
+            memory.beside = window.slot_beside;
+            memory.beside_last = window.slot_beside_last;
+            memory.side = @backingInt(window.slot_side);
+            memory.ratio = window.slot_ratio;
+            memory.left_order = @intCast(@min(window.slot_seq, std.math.maxInt(u32)));
+        }
+        return memory;
+    }
+
+    /// How many windows had the focus before this one last had it, plus one; 0 for a
+    /// window that never had it.
+    fn focus_rank(engine: *const Engine, window: *const Window) u32 {
+        if (window.focus_seq == 0) return 0;
+        var rank: u32 = 1;
+        for (&engine.windows) |*other| {
+            if (other.id == 0 or other.focus_seq == 0) continue;
+            if (other.focus_seq < window.focus_seq) rank += 1;
+        }
+        return rank;
+    }
+
+    /// Where a tile is in layout order and how it joins the tiles before it: the split
+    /// whose second half it starts, and the two ends of the first half of that split.
+    fn tile_memory(engine: *const Engine, leaf: NodeIndex, memory: *WindowMemory) void {
+        const forest = &engine.forest;
+        const root = forest.root_of(leaf);
+        var order: u16 = 1;
+        var at = forest.leaf_first(root);
+        while (at != leaf) : (at = forest.leaf_next(root, at)) {
+            assert(order < windows_max);
+            order += 1;
+        }
+        memory.order = order;
+        var child = leaf;
+        var split = forest.nodes[leaf].parent;
+        var steps: u32 = 0;
+        while (split != node_none and forest.nodes[split].first == child) : (steps += 1) {
+            assert(steps < tree.nodes_max);
+            child = split;
+            split = forest.nodes[split].parent;
+        }
+        if (split == node_none) return; // The first tile joins nothing.
+        const before = forest.nodes[split].first;
+        const below = forest.nodes[split].split == .rows;
+        memory.beside = forest.nodes[forest.leaf_first(before)].window;
+        memory.beside_last = forest.nodes[forest.leaf_last(before)].window;
+        memory.side = @backingInt(if (below) Direction.south else Direction.east);
+        memory.ratio = forest.nodes[split].ratio;
+    }
+
+    fn side_direction(side: u8) Direction {
+        return switch (side) {
+            0 => .west,
+            1 => .south,
+            2 => .north,
+            else => .east,
+        };
+    }
+
+    /// Notes which workspace every display shows, before the displays change.
+    fn shown_remember(engine: *Engine) void {
+        if (engine.monitors_count == 0) return;
+        engine.shown_seq += 1;
+        for (engine.monitors[0..engine.monitors_count]) |*monitor| {
+            engine.workspaces[monitor.workspace].shown_seq = engine.shown_seq;
+        }
+    }
+
+    /// The workspace of this display that was showing when the display was last there.
+    fn workspace_remembered(engine: *const Engine, display: u32) ?u8 {
+        var best: ?u8 = null;
+        var best_seq: u64 = 0;
+        for (&engine.workspaces, 0..) |*workspace, index| {
+            if (workspace.display != display or workspace.shown_seq <= best_seq) continue;
+            if (engine.workspace_shown_anywhere(@intCast(index))) continue;
+            best = @intCast(index);
+            best_seq = workspace.shown_seq;
+        }
+        return best;
     }
 
     fn monitor_insert_sorted(engine: *Engine, info: MonitorInfo) void {
@@ -641,10 +1115,15 @@ pub const Engine = struct {
         return false;
     }
 
-    /// Chooses a workspace for a monitor that has none: one of its own with windows, then
-    /// an empty one, then any that already maps to it, then any hidden one.
+    /// Chooses a workspace for a monitor that has none: the one its display showed last,
+    /// then one of its own with windows, then an empty one, then any that already maps to
+    /// it, then any hidden one.
     fn workspace_pick(engine: *Engine, monitor: u8) u8 {
         const display = engine.monitors[monitor].display;
+        if (engine.workspace_remembered(display)) |workspace| {
+            assert(engine.workspace_monitor(workspace) == monitor);
+            return workspace;
+        }
         var pass: u32 = 0;
         while (pass < 4) : (pass += 1) {
             var workspace: u8 = 0;
@@ -670,12 +1149,21 @@ pub const Engine = struct {
     /// Sticky windows belong to whichever workspace their monitor shows.
     fn sticky_follow(engine: *Engine) void {
         for (&engine.windows) |*window| {
-            if (window.id == 0 or !window.sticky) continue;
-            assert(window.mode == .floating);
-            const monitor = engine.workspace_monitor(window.workspace);
-            window.workspace = engine.monitors[monitor].workspace;
-            engine.tabs_follow(window);
+            if (window.id != 0 and window.sticky) engine.sticky_home(window);
         }
+    }
+
+    fn sticky_home(engine: *Engine, window: *Window) void {
+        assert(window.sticky);
+        assert(window.mode == .floating);
+        if (engine.monitors_count == 0) return;
+        const monitor = engine.workspace_monitor(window.workspace);
+        const shown = engine.monitors[monitor].workspace;
+        if (shown == window.workspace) return;
+        const left = &engine.workspaces[window.workspace];
+        if (left.last_focus == window.id) left.last_focus = 0;
+        window.workspace = shown;
+        engine.tabs_follow(window);
     }
 
     fn tabs_follow(engine: *Engine, leader: *const Window) void {
@@ -749,7 +1237,10 @@ pub const Engine = struct {
 
     fn focus_request(engine: *Engine, window: *Window) void {
         assert(window.focusable());
-        const in_sync = engine.focused_window == window.id and engine.focus_pending_count == 0;
+        // In agreement only when the OS said so last: the keyboard may have gone to a
+        // window that we do not follow, and then the request has to be made again.
+        const in_sync = engine.focused_window == window.id and
+            engine.focus_pending_count == 0 and engine.os_focus == window.id;
         engine.focus_state_set(window);
         if (!in_sync) engine.focus_emit(window);
     }
@@ -778,7 +1269,7 @@ pub const Engine = struct {
     /// The OS tells us where focus is: as a notification that it moved (reported false),
     /// or as the answer to a query_focus of ours (reported true).
     fn focus_observe(engine: *Engine, id: WindowId, reported: bool) void {
-        const repeated = id == engine.os_focus;
+        var repeated = id == engine.os_focus;
         engine.os_focus = id;
         // An echo of a request of ours confirms it and everything requested before it.
         for (engine.focus_pending[0..engine.focus_pending_count], 0..) |pending, index| {
@@ -786,8 +1277,11 @@ pub const Engine = struct {
             engine.focus_pending_drop(@intCast(index + 1));
             // Nothing more to do if we still believe what was confirmed, or if newer
             // requests are in flight. Otherwise our belief moved on without the OS (the
-            // window was sent away, say) and this is news like any other.
+            // window was sent away, say, or its workspace left for an empty one). The OS
+            // is where we sent it; like a repeated announcement, that is not the user
+            // going there, and it must not bring a hidden workspace back.
             if (engine.focused_window == id or engine.focus_pending_count > 0) return;
+            repeated = true;
             break;
         }
         // While a request of ours is in flight, an answer that predates it means nothing.
@@ -802,10 +1296,14 @@ pub const Engine = struct {
         if (id == engine.focused_window) return;
         if (window.tab_of != 0) engine.tab_promote(window);
         const hidden = !engine.workspace_visible(window.workspace);
+        // The engine holds no focus on purpose after the user moved to a monitor that has
+        // no windows, while the OS still has it on a window of another monitor.
+        const away = !hidden and engine.focused_window == 0 and
+            engine.workspace_monitor(window.workspace) != engine.focused_monitor;
         // An application that announces again the focus it already had is not the user
         // going there. Browsers do this all the time; following it would undo every switch
-        // to an empty workspace.
-        if (!reported and repeated and hidden) return;
+        // to an empty workspace or to an empty monitor.
+        if (!reported and repeated and (hidden or away)) return;
         if (reported) {
             // An answer is not a focus change: it never switches workspace or monitor.
             if (hidden) {
@@ -816,7 +1314,12 @@ pub const Engine = struct {
             if (engine.focused_window == 0 and monitor != engine.focused_monitor) return;
         }
         const guarded = engine.now_ms < engine.guard_until_ms and hidden;
-        if (!reported and (engine.now_ms < window.quiet_until_ms or guarded)) {
+        // A window that a rule sent away may not pull focus to where it went. One that
+        // is in view on the monitor in use pulls nothing, and takes focus like any other.
+        const in_view = !hidden and
+            engine.workspace_monitor(window.workspace) == engine.focused_monitor;
+        const quiet = engine.now_ms < window.quiet_until_ms and !in_view;
+        if (!reported and (quiet or guarded)) {
             engine.stats.focus_rejected += 1;
             if (engine.window_find(engine.focused_window)) |current| engine.focus_emit(current);
             return;
@@ -848,8 +1351,8 @@ pub const Engine = struct {
         assert(info.pid != 0);
         const index = engine.app_find(info.pid) orelse engine.app_add(info.pid) orelse return;
         const app = &engine.apps[index];
-        app.name_len = @intCast(stdx.copy_truncate(&app.name, info.name));
-        app.bundle_len = @intCast(stdx.copy_truncate(&app.bundle, info.bundle));
+        app.name_len = text_keep(&app.name, info.name);
+        app.bundle_len = text_keep(&app.bundle, info.bundle);
     }
 
     fn app_add(engine: *Engine, pid: i32) ?u8 {
@@ -868,6 +1371,14 @@ pub const Engine = struct {
             if (window.id != 0 and window.pid == pid) engine.window_remove(window);
         }
         if (engine.app_find(pid)) |index| engine.apps[index] = .{};
+        // What was remembered of its windows is about windows that are gone.
+        var kept: u32 = 0;
+        for (engine.memories[0..engine.memories_count]) |memory| {
+            if (memory.pid == pid) continue;
+            engine.memories[kept] = memory;
+            kept += 1;
+        }
+        engine.memories_count = kept;
     }
 
     fn on_app_unresponsive(engine: *Engine, pid: i32) void {
@@ -885,15 +1396,17 @@ pub const Engine = struct {
     // Windows.
 
     pub fn workspace_current(engine: *const Engine) u8 {
-        if (engine.monitors_count == 0) return 0;
+        // While every display is asleep, the workspace in use is the one that was.
+        assert(engine.monitors_count == 0 or engine.monitors_asleep == 0);
+        if (engine.monitors_count + engine.monitors_asleep == 0) return 0;
         return engine.monitors[engine.focused_monitor].workspace;
     }
 
     /// A new window joins the workspace in use, wherever the application drew it. A window
     /// that was already open at startup stays on the monitor where it was found.
     fn workspace_for(engine: *const Engine, info: WindowInfo) u8 {
-        if (engine.monitors_count == 0) return 0;
-        if (!info.adopted) return engine.workspace_current();
+        if (engine.workspace_left_on(info)) |workspace| return workspace;
+        if (engine.monitors_count == 0 or !info.adopted) return engine.workspace_current();
         const monitor = engine.monitor_at(info.frame.center_x(), info.frame.center_y()) orelse
             engine.focused_monitor;
         return engine.monitors[monitor].workspace;
@@ -919,6 +1432,7 @@ pub const Engine = struct {
         // Popups, tooltips and other helper windows are never ours to manage.
         if (info.kind == .popup) return;
         if (engine.window_find(info.id) != null) return;
+        const memory = engine.memory_take(info);
         const app = engine.app_find(info.pid) orelse engine.app_add(info.pid) orelse {
             engine.stats.windows_dropped += 1;
             return;
@@ -932,7 +1446,7 @@ pub const Engine = struct {
             .id = info.id,
             .pid = info.pid,
             .app = app,
-            .workspace = engine.workspace_for(info),
+            .workspace = if (memory) |known| known.workspace else engine.workspace_for(info),
             .mode = if (tiles) .tiled else .floating,
             .kind = info.kind,
             .resizable = info.resizable,
@@ -942,7 +1456,7 @@ pub const Engine = struct {
             .float_rect = info.frame,
             .appeared_ms = engine.now_ms,
         };
-        window.title_len = @intCast(stdx.copy_truncate(&window.title, info.title));
+        window.title_set(info.title);
         if (engine.window_find(info.tab_of)) |other| {
             if (other.pid == info.pid and other != window) {
                 const leader = engine.representative(other);
@@ -950,9 +1464,104 @@ pub const Engine = struct {
                 window.workspace = leader.workspace;
             }
         }
-        engine.rules_apply(window, true);
+        if (memory) |known| {
+            engine.window_recall(window, known);
+        } else {
+            engine.window_place(window, info);
+        }
         engine.membership_sync(window);
+        // The OS already said that the keyboard is on this window, before we knew it.
+        if (engine.os_focus == info.id) engine.focus_stale = true;
         engine.note(.{ .window_created = info.id });
+    }
+
+    /// A window that nothing is remembered of goes where the rules send it, and
+    /// otherwise stays where it is found.
+    fn window_place(engine: *Engine, window: *Window, info: WindowInfo) void {
+        engine.rules_apply(window, true);
+        if (engine.workspace_left_on(info)) |workspace| {
+            // A restart changes nothing: not even a rule sends the window elsewhere.
+            const movable = window.tab_of == 0 and !window.sticky;
+            if (movable and workspace != window.workspace) engine.window_move(window, workspace);
+            engine.float_rescue(window);
+        } else {
+            engine.float_home(window);
+        }
+    }
+
+    /// A window that the last window manager knew is as it was left. No rule applies to
+    /// it again: it has been arranged once, and a restart changes nothing.
+    fn window_recall(engine: *Engine, window: *Window, memory: WindowMemory) void {
+        window.rules_applied = std.math.maxInt(u64);
+        window.focus_seq = memory.focus_order;
+        engine.focus_seq = @max(engine.focus_seq, memory.focus_order);
+        if (window.tab_of != 0) {
+            // It joined a window that it is a tab of. Of the two, the one that held the
+            // tile before holds it again.
+            const leader = engine.memory_find(window.tab_of);
+            if (memory.tab or leader == null or !leader.?.tab) return;
+            engine.tab_promote(window);
+        }
+        if (memory.tab) {
+            // A tab had nothing of its own. Alone now, it is a window like any other
+            // on the workspace of the window it was a tab of.
+            if (!engine.on_some_monitor(window.float_rect)) engine.float_rescue(window);
+            return;
+        }
+        if (window.workspace != memory.workspace) engine.window_move(window, memory.workspace);
+        window.ignored = memory.ignored;
+        window.mode = if (memory.floating) .floating else .tiled;
+        window.mode_by_user = memory.by_user;
+        window.auto_floated = memory.auto_floated;
+        window.sticky = memory.sticky;
+        window.zoom = switch (memory.zoom) {
+            1 => .parent,
+            2 => .fullscreen,
+            else => .none,
+        };
+        window.label = memory.label;
+        if (memory.float_rect.w > 0) window.float_rect = memory.float_rect;
+        if (memory.order == 0 and (memory.beside != 0 or memory.left_order != 0)) {
+            window.slot_beside = memory.beside;
+            window.slot_beside_last = memory.beside_last;
+            window.slot_side = side_direction(memory.side);
+            window.slot_ratio = memory.ratio;
+            // A file that names a place and no order: it left last, for all we know.
+            engine.slot_seq = @max(engine.slot_seq, memory.left_order);
+            if (memory.left_order == 0) engine.slot_seq += 1;
+            window.slot_seq = if (memory.left_order == 0) engine.slot_seq else memory.left_order;
+        }
+        // In or out of the layout as it is now, before anything else moves it.
+        engine.membership_sync(window);
+        // Where it floated is where it floats, unless no display reaches there any more.
+        if (!engine.on_some_monitor(window.float_rect)) engine.float_rescue(window);
+        if (window.sticky and engine.monitors_count > 0) engine.sticky_follow();
+    }
+
+    fn on_some_monitor(engine: *const Engine, rect: Rect) bool {
+        for (engine.monitors[0..engine.monitors_count]) |*monitor| {
+            if (rect.intersects(monitor.frame)) return true;
+        }
+        return false;
+    }
+
+    /// A new window that floats is never moved to a tile, so it stays where its
+    /// application drew it. Like a floating window that is dragged, it then belongs to
+    /// the monitor it is on, not to the one in use; and when it is on no monitor at all
+    /// (a place remembered from a display that is gone) it is brought into view. When a
+    /// rule chose its workspace the rule wins: the window comes to that workspace's
+    /// monitor if it was drawn wholly off it.
+    fn float_home(engine: *Engine, window: *Window) void {
+        if (engine.monitors_count == 0 or window.mode != .floating) return;
+        if (!window.managed()) return;
+        if (window.rule_placed) return engine.float_rescue(window);
+        const frame = window.float_rect;
+        if (engine.monitor_at(frame.center_x(), frame.center_y())) |monitor| {
+            if (monitor == engine.workspace_monitor(window.workspace)) return;
+            window.workspace = engine.monitors[monitor].workspace;
+        } else {
+            engine.float_rescue(window);
+        }
     }
 
     fn on_window_destroyed(engine: *Engine, id: WindowId) void {
@@ -981,15 +1590,19 @@ pub const Engine = struct {
             next.tab_of = 0;
             next.workspace = window.workspace;
             next.mode = window.mode;
+            next.auto_floated = window.auto_floated;
             next.zoom = window.zoom;
             next.sticky = window.sticky;
             next.float_rect = window.float_rect;
-            next.label = window.label;
+            // The name of the window that was showing goes on with what shows in its
+            // place, unless the tab has a name of its own.
+            if (next.label.len == 0) next.label = window.label;
             next.desired_valid = false;
             for (&engine.windows) |*other| {
                 if (other.id != 0 and other.tab_of == id) other.tab_of = next.id;
             }
             if (leaf != node_none) engine.forest.nodes[leaf].window = next.id;
+            engine.slots_rename(id, next.id);
         } else if (leaf != node_none) {
             engine.forest.remove(&workspace.root, id);
         }
@@ -1029,10 +1642,149 @@ pub const Engine = struct {
             engine.forest.remove(&workspace.root, window.id);
         }
         if (!window.in_layout() and window.zoom == .parent) window.zoom = .none;
+        // A remembered place is spent once the window is back, in the layout or not.
+        if (window.managed()) {
+            window.slot_beside = 0;
+            window.slot_seq = 0;
+        }
         assert(window.in_layout() == (engine.forest.leaf_find(window.id) != node_none));
     }
 
+    /// Remembers where a window sits in the layout before it leaves it for a while.
+    fn slot_remember(engine: *Engine, window: *Window) void {
+        window.slot_beside = 0;
+        window.slot_seq = 0;
+        if (engine.forest.leaf_find(window.id) == node_none) return;
+        engine.slot_keep(window, engine.slot_of(window.id));
+    }
+
+    /// Notes the place a window leaves, and that it is the last one to have left.
+    fn slot_keep(engine: *Engine, window: *Window, slot: Slot) void {
+        window.slot_beside = slot.beside;
+        window.slot_beside_last = slot.beside_last;
+        window.slot_side = slot.side;
+        window.slot_ratio = slot.ratio;
+        engine.slot_seq += 1;
+        window.slot_seq = engine.slot_seq;
+    }
+
+    /// The place of a tile in its layout, as a window keeps it (see Window.slot_beside).
+    fn slot_of(engine: *const Engine, id: WindowId) Slot {
+        const forest = &engine.forest;
+        const leaf = forest.leaf_find(id);
+        // Not in the layout, or alone in it: it sits beside nobody.
+        if (leaf == node_none or forest.nodes[leaf].parent == node_none) return .{};
+        const split = &forest.nodes[forest.nodes[leaf].parent];
+        const first = split.first == leaf;
+        const beside = if (first) split.second else split.first;
+        return .{
+            .beside = forest.nodes[forest.leaf_first(beside)].window,
+            .beside_last = forest.nodes[forest.leaf_last(beside)].window,
+            .side = switch (split.split) {
+                .columns => if (first) .west else .east,
+                .rows => if (first) .north else .south,
+            },
+            .ratio = split.ratio,
+        };
+    }
+
+    /// The smallest part of a layout that holds what is left in it of the two ends of
+    /// a subtree, or node_none when neither is there.
+    fn slot_target(engine: *const Engine, root: NodeIndex, ends: [2]WindowId) NodeIndex {
+        const forest = &engine.forest;
+        var target: NodeIndex = node_none;
+        for (ends) |id| {
+            if (id == 0) continue;
+            const leaf = forest.leaf_find(id);
+            if (leaf == node_none or forest.root_of(leaf) != root) continue;
+            target = if (target == node_none) leaf else forest.ancestor_common(target, leaf);
+        }
+        return target;
+    }
+
+    /// Puts a window back in the place it left. Windows that left the layout after it
+    /// left a layout that it was not part of: hiding an application takes all of its
+    /// windows away one by one, and showing it brings them back in any order. So they
+    /// come back first, the last to leave first, which makes the layout the one this
+    /// window left. Afterwards they leave again and remember their places anew.
+    fn slot_restore(engine: *Engine, window: *Window) bool {
+        const seq = window.slot_seq;
+        window.slot_seq = 0;
+        if (seq == 0 or window.slot_beside == 0) return false;
+        var later: [windows_max]WindowId = undefined;
+        const count = engine.slots_unwind(window.workspace, seq, &later);
+        const restored = engine.slot_place(window);
+        window.slot_beside = 0;
+        var index = count;
+        while (index > 0) : (index -= 1) {
+            const other = engine.window_find(later[index - 1]).?;
+            engine.slot_remember(other);
+            engine.forest.remove(&engine.workspaces[other.workspace].root, other.id);
+        }
+        return restored;
+    }
+
+    /// Puts the windows of the workspace that left its layout after the given moment, and
+    /// are still away, back in their places, the last to leave first. Returns how many,
+    /// and which, in that order.
+    fn slots_unwind(
+        engine: *Engine,
+        workspace: u8,
+        seq: u64,
+        later: *[windows_max]WindowId,
+    ) u32 {
+        var count: u32 = 0;
+        var bound: u64 = std.math.maxInt(u64);
+        while (count < windows_max) {
+            var last: ?*Window = null;
+            for (&engine.windows) |*other| {
+                if (other.id == 0 or other.slot_seq <= seq or other.slot_seq >= bound) continue;
+                if (!other.slot_waits(workspace)) continue;
+                if (last == null or other.slot_seq > last.?.slot_seq) last = other;
+            }
+            const other = last orelse break;
+            bound = other.slot_seq;
+            // A window whose place is gone stays away as it is.
+            if (!engine.slot_place(other)) continue;
+            later[count] = other.id;
+            count += 1;
+        }
+        return count;
+    }
+
+    /// Another tab of its group shows in the tile now. The windows that remember to have
+    /// sat beside that tile know it by the window that shows.
+    fn slots_rename(engine: *Engine, from: WindowId, to: WindowId) void {
+        for (&engine.windows) |*window| {
+            if (window.id == 0) continue;
+            if (window.slot_beside == from) window.slot_beside = to;
+            if (window.slot_beside_last == from) window.slot_beside_last = to;
+        }
+    }
+
+    /// Inserts the window where it remembers to have been: alone, or beside the smallest
+    /// part of the layout that holds what is left, on its workspace, of the two ends of
+    /// the subtree it sat beside. Exact when nothing else changed in between, and still
+    /// beside the same windows when that subtree gained or lost some.
+    fn slot_place(engine: *Engine, window: *const Window) bool {
+        const forest = &engine.forest;
+        const workspace = &engine.workspaces[window.workspace];
+        const ends = [2]WindowId{ window.slot_beside, window.slot_beside_last };
+        if (ends[0] == 0) {
+            if (workspace.root != node_none) return false;
+            forest.insert(&workspace.root, node_none, window.id, .auto);
+            return true;
+        }
+        const target = engine.slot_target(workspace.root, ends);
+        if (target == node_none) return false;
+        forest.insert_beside(&workspace.root, target, window.id, window.slot_side);
+        const split = forest.nodes[forest.leaf_find(window.id)].parent;
+        forest.nodes[split].ratio = window.slot_ratio;
+        return true;
+    }
+
     fn tree_insert(engine: *Engine, window: *Window) void {
+        if (engine.slot_restore(window)) return;
         const workspace = &engine.workspaces[window.workspace];
         const placement: tree.Placement = if (workspace.insert) |side| .{ .side = side } else .auto;
         const percent = workspace.insert_percent;
@@ -1047,7 +1799,8 @@ pub const Engine = struct {
         if (percent != 0) engine.forest.share_set(engine.forest.leaf_find(window.id), percent);
     }
 
-    /// New windows split the focused window, else the last focused one, else the last leaf.
+    /// New windows split the focused window, else the last focused one, else the tile that
+    /// had focus most recently, else the last leaf.
     fn insert_anchor(engine: *Engine, workspace_index: u8) NodeIndex {
         const workspace = &engine.workspaces[workspace_index];
         assert(workspace.root != node_none);
@@ -1057,17 +1810,42 @@ pub const Engine = struct {
             const leaf = engine.forest.leaf_find(id);
             if (leaf != node_none and engine.forest.root_of(leaf) == workspace.root) return leaf;
         }
-        return engine.forest.leaf_last(workspace.root);
+        // A floating window has the focus: the new one goes beside the tile used before it,
+        // not to the far end of the layout.
+        const forest = &engine.forest;
+        var best = forest.leaf_last(workspace.root);
+        var best_seq: u64 = 0;
+        var count: u32 = 0;
+        var leaf = forest.leaf_first(workspace.root);
+        while (leaf != node_none) : (leaf = forest.leaf_next(workspace.root, leaf)) {
+            assert(count < windows_max);
+            count += 1;
+            const seq = engine.window_find(forest.nodes[leaf].window).?.focus_seq;
+            if (seq <= best_seq) continue;
+            best = leaf;
+            best_seq = seq;
+        }
+        return best;
     }
 
     fn mode_set(engine: *Engine, window: *Window, mode: Mode) void {
         if (window.mode == mode) return;
-        if (mode == .tiled) window.sticky = false;
+        if (mode == .tiled) {
+            window.sticky = false;
+            window.auto_floated = false;
+        }
         const on_screen = window.desired_valid and engine.workspace_visible(window.workspace);
         if (mode == .floating and on_screen and window.zoom == .none) {
-            window.float_rect = window.actual;
+            // A frame that is still on its way is where the window will be. Where it was
+            // last seen may be the corner it was parked in.
+            const arrived = window.actual.x == window.desired.x and
+                window.actual.y == window.desired.y;
+            window.float_rect = if (arrived) window.actual else window.desired;
         }
         window.mode = mode;
+        // Hidden or zoomed, the window floats where it floated last or was first drawn,
+        // and that may be on another monitor than the one its workspace is on.
+        if (window.desired_valid) engine.float_rescue(window);
         engine.membership_sync(window);
     }
 
@@ -1084,11 +1862,13 @@ pub const Engine = struct {
             engine.workspaces[origin].last_focus = 0;
         }
         if (engine.monitors_count > 0) {
-            // Floating windows keep their spot relative to the monitor.
+            // Floating windows keep their spot relative to the monitor. On a monitor of
+            // another size that spot may hang off its edge, or be bigger than all of it.
             const from = engine.monitors[engine.workspace_monitor(origin)].visible;
             const to = engine.monitors[engine.workspace_monitor(target)].visible;
             window.float_rect.x += to.x - from.x;
             window.float_rect.y += to.y - from.y;
+            if (!from.eql(to)) window.float_rect = rect_within(window.float_rect, to);
         }
         window.workspace = target;
         window.zoom = .none;
@@ -1096,6 +1876,18 @@ pub const Engine = struct {
         engine.float_rescue(window);
         engine.tabs_follow(window);
         engine.membership_sync(window);
+    }
+
+    /// The rect moved, and shrunk if it must be, so that all of it is inside the area.
+    fn rect_within(rect: Rect, area: Rect) Rect {
+        const w = @min(rect.w, area.w);
+        const h = @min(rect.h, area.h);
+        return .{
+            .x = std.math.clamp(rect.x, area.x, area.right() - w),
+            .y = std.math.clamp(rect.y, area.y, area.bottom() - h),
+            .w = w,
+            .h = h,
+        };
     }
 
     // Rules.
@@ -1125,12 +1917,23 @@ pub const Engine = struct {
             .tile => if (!window.mode_by_user) engine.mode_set(window, .tiled),
             .sticky => {
                 engine.mode_set(window, .floating);
-                window.sticky = true;
+                // A tab has no place of its own to keep in view: it rides along with the
+                // window that shows, and takes over that window's place when it shows.
+                window.sticky = window.tab_of == 0;
+                if (!window.sticky) return;
+                // Sticky is in view by definition, whatever workspace the window was on
+                // or another rule sent it to, and a window in view may have the keyboard.
+                engine.sticky_home(window);
+                window.quiet_until_ms = 0;
             },
             .ignore => window.ignored = true,
             .workspace => |target| {
-                const movable = window.tab_of == 0 and !window.sticky;
-                if (movable and target != window.workspace) engine.window_move(window, target);
+                // A tab stays with its window and a sticky window with its monitor.
+                if (window.tab_of != 0 or window.sticky) return;
+                window.rule_placed = true;
+                if (target == window.workspace) return;
+                engine.window_move(window, target);
+                // Sent away: only then is there a workspace it must not pull back.
                 window.quiet_until_ms = engine.now_ms + quiet_ms;
             },
         }
@@ -1138,14 +1941,27 @@ pub const Engine = struct {
 
     fn on_title_changed(engine: *Engine, id: WindowId, title: []const u8) void {
         const window = engine.window_find(id) orelse return;
-        window.title_len = @intCast(stdx.copy_truncate(&window.title, title));
+        window.title_set(title);
         if (engine.now_ms - window.appeared_ms > rule_grace_ms) return;
+        const origin = window.workspace;
         engine.rules_apply(window, false);
         engine.membership_sync(window);
+        if (engine.focused_window != id) return;
+        if (window.focusable() and window.workspace == origin) return;
+        // The rule took the window in use away. Sent to another workspace, it gives the
+        // keyboard to the next window where the user is.
+        engine.focused_window = 0;
+        if (window.focusable()) return engine.focus_after_loss(origin, 0);
+        // Ignored now: as with a window that is ignored from the start, the keyboard is
+        // left where it is and we go by the window that was used before.
+        if (!engine.workspace_visible(origin)) return;
+        const next = engine.window_find(engine.workspace_focus_candidate(origin)) orelse return;
+        engine.focus_state_set(next);
     }
 
     fn on_minimized(engine: *Engine, id: WindowId, minimized: bool) void {
         const window = engine.window_find(id) orelse return;
+        if (minimized and window.managed()) engine.slot_remember(window);
         window.minimized = minimized;
         engine.membership_sync(window);
         if (minimized and engine.focused_window == id) {
@@ -1156,8 +1972,29 @@ pub const Engine = struct {
 
     fn on_fullscreen(engine: *Engine, id: WindowId, fullscreen: bool) void {
         const window = engine.window_find(id) orelse return;
+        if (fullscreen and window.managed()) engine.slot_remember(window);
+        const left = window.fullscreen and !fullscreen;
         window.fullscreen = fullscreen;
+        // A floating window that leaves fullscreen floats where macOS puts it back. The
+        // place we had for it may be the display it filled: its frame can grow before we
+        // are told why, and that looks like the window moving itself there. Nor is the
+        // frame we know now the one it returns to, for sure: that one may still be on
+        // its way, or be reported late. So the window is left alone for a while, and
+        // then floats where it is (see float_return).
+        if (left and window.mode == .floating and window.zoom == .none) {
+            window.float_return_until_ms = engine.now_ms + fullscreen_exit_ms;
+        }
         engine.membership_sync(window);
+    }
+
+    /// The time that a floating window had to come back from native fullscreen is up:
+    /// it floats where it is now, and is ours to place again.
+    fn float_return(window: *Window) void {
+        assert(window.float_return_until_ms != 0);
+        window.float_return_until_ms = 0;
+        if (window.mode == .floating and window.zoom == .none and window.managed()) {
+            window.float_rect = window.actual;
+        }
     }
 
     // Native tabs: one window of a tab group is in the layout, the others ride along.
@@ -1172,6 +2009,7 @@ pub const Engine = struct {
         window.tab_of = 0;
         window.workspace = leader.workspace;
         window.mode = leader.mode;
+        window.auto_floated = leader.auto_floated;
         window.zoom = leader.zoom;
         window.sticky = leader.sticky;
         window.float_rect = leader.float_rect;
@@ -1184,6 +2022,7 @@ pub const Engine = struct {
         leader.sticky = false;
         leader.desired_valid = false;
         if (leaf != node_none) engine.forest.nodes[leaf].window = window.id;
+        engine.slots_rename(leader.id, window.id);
         if (workspace.last_focus == leader.id) workspace.last_focus = window.id;
         if (engine.focused_window == leader.id) engine.focused_window = window.id;
         engine.membership_sync(window);
@@ -1204,9 +2043,14 @@ pub const Engine = struct {
         const target_id = if (target) |leader| leader.id else 0;
         if (window.tab_of == target_id) return;
         if (target == null) {
-            // Dragged out of its tab group into a window of its own.
+            // Dragged out of its tab group into a window of its own. It keeps the mode its
+            // rules gave it, and a floating one stays where it was dropped.
             window.tab_of = 0;
-            window.mode = if (window.kind == .standard and window.resizable) .tiled else .floating;
+            if (window.kind != .standard or !window.resizable) window.mode = .floating;
+            // Out of view, where it is now is the corner its group was parked in.
+            const shown = engine.monitors_count == 0 or engine.workspace_visible(window.workspace);
+            if (window.mode == .floating and shown) window.float_rect = window.actual;
+            engine.float_rescue(window);
             window.desired_valid = false;
             engine.membership_sync(window);
             return;
@@ -1351,6 +2195,21 @@ pub const Engine = struct {
         };
     }
 
+    /// A floating window that a command of ours carried onto another monitor joins the
+    /// workspace shown there, as one that the user dragged over does. Carried off every
+    /// monitor, it comes back to the middle of its own instead of being lost.
+    fn float_settle(engine: *Engine, window: *Window) void {
+        assert(window.mode == .floating);
+        const rect = window.float_rect;
+        const monitor = engine.monitor_at(rect.center_x(), rect.center_y()) orelse {
+            return engine.float_rescue(window);
+        };
+        if (monitor == engine.workspace_monitor(window.workspace)) return;
+        engine.window_move(window, engine.monitors[monitor].workspace);
+        window.float_rect = rect;
+        if (engine.focused_window == window.id) engine.focused_monitor_follow(window);
+    }
+
     /// The user dragged or resized a tiled window with the mouse.
     fn user_adjust(engine: *Engine, window: *Window, frame: Rect) void {
         assert(window.in_layout());
@@ -1358,8 +2217,11 @@ pub const Engine = struct {
         const old = window.desired;
         if (frame.same_size(old)) {
             // Dropped on another tiled window: trade places with it.
-            const target =
-                engine.window_at(frame.center_x(), frame.center_y(), window) orelse return;
+            const x = frame.center_x();
+            const y = frame.center_y();
+            const target = engine.window_at(x, y, window) orelse {
+                return engine.tile_drop_elsewhere(window, x, y);
+            };
             if (target.workspace == window.workspace) {
                 engine.forest.swap_windows(leaf, engine.forest.leaf_find(target.id));
             } else {
@@ -1379,6 +2241,16 @@ pub const Engine = struct {
         if (frame.bottom() != old.bottom()) {
             _ = forest.resize_edge(leaf, .south, frame.bottom() - old.bottom(), gap);
         }
+    }
+
+    /// A tile dropped where no other tile is. On another monitor, whose workspace has no
+    /// tile there, the window joins that workspace; on its own monitor it snaps back.
+    fn tile_drop_elsewhere(engine: *Engine, window: *Window, x: i32, y: i32) void {
+        assert(window.in_layout());
+        const monitor = engine.monitor_at(x, y) orelse return;
+        if (monitor == engine.workspace_monitor(window.workspace)) return;
+        engine.window_move(window, engine.monitors[monitor].workspace);
+        if (engine.focused_window == window.id) engine.focused_monitor_follow(window);
     }
 
     /// The tiled window on a visible workspace whose cell contains the point.
@@ -1403,7 +2275,10 @@ pub const Engine = struct {
             engine.emit(.query_focus);
         }
         for (&engine.windows) |*window| {
-            if (window.id == 0 or window.recheck_at_ms == 0) continue;
+            if (window.id == 0) continue;
+            const until_ms = window.float_return_until_ms;
+            if (until_ms != 0 and until_ms <= engine.now_ms) float_return(window);
+            if (window.recheck_at_ms == 0) continue;
             if (window.recheck_at_ms <= engine.now_ms) engine.recheck(window);
         }
         for (&engine.apps, 0..) |*app, index| {
@@ -1445,6 +2320,8 @@ pub const Engine = struct {
             window.auto_floated = true;
             engine.stats.windows_auto_floated += 1;
             engine.mode_set(window, .floating);
+            // It floats where it insists on being, not where it was asked to go.
+            window.float_rect = window.actual;
             return;
         }
         window.frozen = true;
@@ -1452,20 +2329,38 @@ pub const Engine = struct {
 
     /// Where a hidden window waits: past a bottom corner of its monitor, with one pixel
     /// left on screen because macOS refuses to move a window fully off screen. Of the two
-    /// corners, the one that shows less of the window on the other monitors wins.
+    /// corners, the one that shows less of the window on the other monitors wins. When
+    /// another monitor lies under both corners, the window waits beside its monitor at
+    /// the top instead, if less of it shows from there.
     fn park_rect(engine: *const Engine, monitor_index: u8, window: *const Window) Rect {
         const frame = engine.monitors[monitor_index].frame;
         const y = frame.bottom() - 1 - window.park_lift;
-        // Keep the size it was parked with, so a parked window is never asked twice.
-        const parked = window.desired_valid and window.desired.y == y;
-        const w = if (parked) window.desired.w else window.actual.w;
-        const h = if (parked) window.desired.h else window.actual.h;
-        const right: Rect = .{ .x = frame.right() - 1, .y = y, .w = w, .h = h };
-        const left: Rect = .{ .x = frame.x - w + 1, .y = y, .w = w, .h = h };
-        return if (engine.exposure(left, monitor_index) < engine.exposure(right, monitor_index))
-            left
-        else
-            right;
+        const top = engine.monitors[monitor_index].visible.y;
+        // Keep the size it was parked with, so a parked window is never asked twice. A
+        // tile can sit at the very height of a parking spot, so the side has to match as
+        // well: taking the tile's size for the parked one would leave a window that
+        // refuses to be that small in view.
+        const desired = window.desired;
+        const at_side = desired.x == frame.right() - 1 or desired.right() - 1 == frame.x;
+        const parked = window.desired_valid and at_side and (desired.y == y or desired.y == top);
+        const w = if (parked) desired.w else window.actual.w;
+        const h = if (parked) desired.h else window.actual.h;
+        const spots = [4]Rect{
+            .{ .x = frame.right() - 1, .y = y, .w = w, .h = h },
+            .{ .x = frame.x - w + 1, .y = y, .w = w, .h = h },
+            .{ .x = frame.right() - 1, .y = top, .w = w, .h = h },
+            .{ .x = frame.x - w + 1, .y = top, .w = w, .h = h },
+        };
+        // The first spot wins a tie, so nothing changes where a corner is free.
+        var best = spots[0];
+        var best_shown = engine.exposure(best, monitor_index);
+        for (spots[1..]) |spot| {
+            const shown = engine.exposure(spot, monitor_index);
+            if (shown >= best_shown) continue;
+            best = spot;
+            best_shown = shown;
+        }
+        return best;
     }
 
     /// How much of the rect shows on monitors other than the given one, in pixels.
@@ -1480,26 +2375,48 @@ pub const Engine = struct {
         return total;
     }
 
+    /// Where a window is meant to be. No window is ever asked to have no size: on a
+    /// display smaller than its gaps, or with more tiles than pixels, a tile is one pixel
+    /// and lies over its neighbours.
     fn window_target(engine: *const Engine, window: *const Window) ?Rect {
-        if (!window.managed()) return null;
+        if (!window.managed() or window.float_return_until_ms != 0) return null;
         const monitor_index = engine.workspace_monitor(window.workspace);
         const monitor = &engine.monitors[monitor_index];
-        if (monitor.workspace != window.workspace) return engine.park_rect(monitor_index, window);
+        if (monitor.workspace != window.workspace) {
+            return rect_sized(engine.park_rect(monitor_index, window));
+        }
         const area = engine.workspace_rect(monitor_index);
-        if (window.zoom == .fullscreen) return area;
-        if (window.mode == .floating) return window.float_rect;
+        if (window.zoom == .fullscreen) return tile_sized(area, area);
+        if (window.mode == .floating) return rect_sized(window.float_rect);
         const leaf = engine.forest.leaf_find(window.id);
         assert(leaf != node_none);
         const node = &engine.forest.nodes[leaf];
         if (window.zoom == .parent and node.parent != node_none) {
-            return engine.forest.nodes[node.parent].rect;
+            return tile_sized(engine.forest.nodes[node.parent].rect, area);
         }
-        return node.rect;
+        return tile_sized(node.rect, area);
+    }
+
+    fn rect_sized(rect: Rect) Rect {
+        return .{ .x = rect.x, .y = rect.y, .w = @max(1, rect.w), .h = @max(1, rect.h) };
+    }
+
+    /// A tile that is given its one pixel stays inside the area it is a part of. A tile
+    /// that has a size is returned as it is.
+    fn tile_sized(rect: Rect, area: Rect) Rect {
+        const w = @max(1, rect.w);
+        const h = @max(1, rect.h);
+        return .{
+            .x = @max(area.x, @min(rect.x, area.right() - w)),
+            .y = @max(area.y, @min(rect.y, area.bottom() - h)),
+            .w = w,
+            .h = h,
+        };
     }
 
     /// Recomputes every target frame and sends the ones that changed. Idempotent.
     fn arrange(engine: *Engine) void {
-        if (engine.monitors_count == 0) return;
+        if (engine.monitors_count == 0) return engine.arrange_asleep();
         for (engine.monitors[0..engine.monitors_count], 0..) |*monitor, index| {
             const root = engine.workspaces[monitor.workspace].root;
             const area = engine.workspace_rect(@intCast(index));
@@ -1512,6 +2429,21 @@ pub const Engine = struct {
                 if (engine.workspace_visible(window.workspace) != visible_pass) continue;
                 engine.arrange_window(window);
             }
+        }
+    }
+
+    /// With every display asleep nothing is placed. A window that left our care in the
+    /// meantime (minimized, native fullscreen, now a tab) is still not ours to move, and
+    /// one whose place is no longer known has no frame to wait for: what such a window
+    /// was owed is forgotten, as it is when the displays are awake.
+    fn arrange_asleep(engine: *Engine) void {
+        assert(engine.monitors_count == 0);
+        for (&engine.windows) |*window| {
+            if (window.id == 0) continue;
+            if (!window.managed()) window.desired_valid = false;
+            if (window.desired_valid) continue;
+            window.set_pending = false;
+            window.recheck_at_ms = 0;
         }
     }
 
@@ -1593,8 +2525,9 @@ pub const Engine = struct {
             .move_floating => |delta| {
                 const window = engine.focused() orelse return;
                 if (window.mode != .floating or window.zoom != .none) return;
-                window.float_rect.x += delta.dx;
-                window.float_rect.y += delta.dy;
+                window.float_rect.x += std.math.clamp(delta.dx, -nudge_max, nudge_max);
+                window.float_rect.y += std.math.clamp(delta.dy, -nudge_max, nudge_max);
+                engine.float_settle(window);
             },
             .layout => |layout| engine.command_layout(layout),
             .close => {
@@ -1627,7 +2560,10 @@ pub const Engine = struct {
             .float => |float| engine.command_float(float.window, float.bounds),
             .tile => |ref| {
                 const window = engine.window_resolve(ref) orelse return true;
-                if (!window.managed()) return true;
+                if (!window.managed()) {
+                    engine.fail("conflict: window {d} cannot be tiled", .{window.id});
+                    return true;
+                }
                 window.mode_by_user = true;
                 window.auto_floated = false;
                 engine.mode_set(window, .tiled);
@@ -1781,6 +2717,9 @@ pub const Engine = struct {
         if (!window.managed()) {
             return engine.fail("conflict: window {d} cannot be tiled", .{window.id});
         }
+        // The move says where the window goes. Joining the layout on the way must not
+        // spend the place that insert keeps for the next new window.
+        const kept = engine.workspaces[anchor.workspace];
         if (window.workspace != anchor.workspace) {
             engine.window_send(window, anchor.workspace, engine.focused_window == window.id);
         }
@@ -1793,6 +2732,8 @@ pub const Engine = struct {
         assert(window.workspace == anchor.workspace);
         const forest = &engine.forest;
         const workspace = &engine.workspaces[window.workspace];
+        workspace.insert = kept.insert;
+        workspace.insert_percent = kept.insert_percent;
         forest.remove(&workspace.root, window.id);
         const beside = forest.leaf_find(anchor.id);
         forest.insert(&workspace.root, beside, window.id, .{ .side = move.side });
@@ -2043,32 +2984,187 @@ pub const Engine = struct {
 
     fn on_adoption(engine: *Engine, phase: Adoption) void {
         engine.adopting = phase == .begin;
-        if (engine.adopting or engine.monitors_count == 0) return;
-        // The windows were reported application by application. Tile them the way they
-        // sit on screen instead, so that a restart keeps the arrangement it finds.
+        if (engine.adopting) return;
         var workspace: u8 = 0;
         while (workspace < workspaces_max) : (workspace += 1) {
-            var order: [windows_max]WindowId = undefined;
-            const count = engine.tiles_collect(workspace, &order);
-            if (count < 2) continue;
-            var index: u32 = 1;
-            while (index < count) : (index += 1) {
-                const id = order[index];
-                var at = index;
-                while (at > 0 and engine.reads_before(id, order[at - 1])) : (at -= 1) {
-                    order[at] = order[at - 1];
-                }
-                order[at] = id;
-            }
-            engine.workspace_rebuild(workspace, order[0..count]);
+            if (engine.layout_recall(workspace)) continue;
+            if (engine.monitors_count > 0) engine.layout_as_found(workspace);
         }
-        // Now every frame that was held back goes out, once, to where the window ends up.
-        engine.arrange();
+        engine.memories_spend();
+        // One layout for all of them, so that each held frame is for where its window
+        // ends up. With every display asleep there is nothing to place, and the frames
+        // that were held back still go out: a frame that stays held with nothing to
+        // wait for would have the timer fire for ever.
+        if (engine.monitors_count > 0) engine.arrange();
         for (&engine.windows) |*window| {
             if (window.id == 0 or !window.set_pending) continue;
             window.set_pending = false;
             if (window.desired_valid and window.managed()) engine.frame_send(window);
         }
+    }
+
+    /// The windows were reported application by application. Tile them the way they sit
+    /// on screen instead, so that a first start keeps the arrangement it finds.
+    fn layout_as_found(engine: *Engine, workspace: u8) void {
+        var order: [windows_max]WindowId = undefined;
+        const count = engine.tiles_collect(workspace, &order);
+        if (count < 2) return;
+        engine.reading_sort(order[0..count]);
+        engine.workspace_rebuild(workspace, order[0..count]);
+    }
+
+    fn reading_sort(engine: *Engine, order: []WindowId) void {
+        var index: u32 = 1;
+        while (index < order.len) : (index += 1) {
+            const id = order[index];
+            var at = index;
+            while (at > 0 and engine.reads_before(id, order[at - 1])) : (at -= 1) {
+                order[at] = order[at - 1];
+            }
+            order[at] = id;
+        }
+    }
+
+    /// The tiles that the last window manager left on a workspace, in its layout order.
+    /// A window that is ours counts only where it is; one that is not is still counted,
+    /// as the layout is shaped by every tile that was in it.
+    fn memories_of(engine: *Engine, workspace: u8, out: *[windows_max]WindowMemory) u32 {
+        var count: u32 = 0;
+        for (engine.memories[0..engine.memories_count]) |memory| {
+            if (memory.workspace != workspace or memory.order == 0) continue;
+            if (engine.window_find(memory.id)) |window| {
+                if (window.workspace != workspace or window.mode != .tiled) continue;
+                if (window.tab_of != 0 or window.ignored) continue;
+            }
+            var at = count;
+            while (at > 0 and memory_before(memory, out[at - 1])) : (at -= 1) {
+                out[at] = out[at - 1];
+            }
+            out[at] = memory;
+            count += 1;
+        }
+        return count;
+    }
+
+    fn memory_before(a: WindowMemory, b: WindowMemory) bool {
+        if (a.order != b.order) return a.order < b.order;
+        return a.id < b.id;
+    }
+
+    /// Rebuilds the layout of a workspace as the last window manager left it, when it
+    /// left word of it. Tiles that are missing (closed, minimized, or their application
+    /// is slow to report them) are put in all the same and then taken out with their
+    /// place noted, which leaves the others exactly where a window going away would.
+    /// Windows that it did not know follow at the end.
+    fn layout_recall(engine: *Engine, workspace_index: u8) bool {
+        var known: [windows_max]WindowMemory = undefined;
+        const known_count = engine.memories_of(workspace_index, &known);
+        if (known_count == 0) return false;
+        var rest: [windows_max]WindowId = undefined;
+        const rest_count = engine.tiles_collect(workspace_index, &rest);
+        const workspace = &engine.workspaces[workspace_index];
+        const forest = &engine.forest;
+        forest.clear(&workspace.root);
+        // Every tile takes two nodes at most, and the ones that are ours must all fit.
+        assert(forest.free_count / 2 >= rest_count);
+        var spare = forest.free_count / 2 - rest_count;
+        var last = node_none;
+        for (known[0..known_count]) |memory| {
+            const window = engine.window_find(memory.id);
+            if (window == null or !window.?.in_layout()) {
+                if (spare == 0) continue;
+                spare -= 1;
+            }
+            if (last == node_none) {
+                forest.insert(&workspace.root, node_none, memory.id, .auto);
+            } else {
+                // What it split is there by now in a file that is true to a layout.
+                const ends = [2]WindowId{ memory.beside, memory.beside_last };
+                var target = engine.slot_target(workspace.root, ends);
+                if (target == node_none) target = last;
+                const below = side_direction(memory.side).axis() == .y;
+                const side: Direction = if (below) .south else .east;
+                forest.insert_beside(&workspace.root, target, memory.id, side);
+                forest.nodes[forest.nodes[target].parent].ratio = memory.ratio;
+            }
+            last = forest.leaf_find(memory.id);
+        }
+        engine.layout_append(workspace_index, rest[0..rest_count]);
+        engine.layout_prune(workspace_index, known[0..known_count]);
+        return true;
+    }
+
+    /// Adds the windows that are not in the layout of the workspace yet at its end, in
+    /// the order they sit on screen.
+    fn layout_append(engine: *Engine, workspace_index: u8, tiles: []WindowId) void {
+        const workspace = &engine.workspaces[workspace_index];
+        const forest = &engine.forest;
+        engine.reading_sort(tiles);
+        for (tiles) |id| {
+            if (forest.leaf_find(id) != node_none) continue;
+            if (engine.monitors_count > 0) {
+                const area = engine.workspace_rect(engine.workspace_monitor(workspace_index));
+                forest.layout(workspace.root, area, engine.gap_inner(workspace_index));
+            }
+            forest.insert(&workspace.root, forest.leaf_last(workspace.root), id, .auto);
+        }
+    }
+
+    /// Takes the tiles that are not there out of a layout that was rebuilt with them.
+    /// Each keeps the place it left, for when it turns up or is brought back.
+    fn layout_prune(engine: *Engine, workspace_index: u8, known: []const WindowMemory) void {
+        const workspace = &engine.workspaces[workspace_index];
+        var index = known.len;
+        while (index > 0) : (index -= 1) {
+            const id = known[index - 1].id;
+            if (engine.forest.leaf_find(id) == node_none) continue;
+            const window = engine.window_find(id);
+            if (window != null and window.?.in_layout()) continue;
+            const slot = engine.slot_of(id);
+            engine.forest.remove(&workspace.root, id);
+            if (window) |gone| {
+                engine.slot_keep(gone, slot);
+            } else {
+                const memory = engine.memory_find(id).?;
+                memory.order = 0;
+                memory.beside = slot.beside;
+                memory.beside_last = slot.beside_last;
+                memory.side = @backingInt(slot.side);
+                memory.ratio = slot.ratio;
+            }
+        }
+    }
+
+    /// The adoption is over, and what was remembered of the windows that are here is
+    /// spent. The rest waits for an application that is slow to report its windows, for
+    /// as long as that application runs.
+    fn memories_spend(engine: *Engine) void {
+        engine.memories_fresh = false;
+        if (engine.memories_count == 0) return;
+        var focus: ?*Window = null;
+        var kept: u32 = 0;
+        for (engine.memories[0..engine.memories_count]) |memory| {
+            if (engine.window_find(memory.id)) |window| {
+                if (memory.focused and window.focusable()) focus = window;
+                continue;
+            }
+            if (engine.app_find(memory.pid) == null) continue;
+            engine.memories[kept] = memory;
+            kept += 1;
+        }
+        engine.memories_count = kept;
+        if (engine.focused_window == 0) {
+            if (focus) |window| {
+                // Whatever happened to the displays, the window in use stays in view.
+                const shown = engine.monitors_count == 0 or
+                    engine.workspace_visible(window.workspace);
+                if (!shown) engine.workspace_show(window.workspace);
+                engine.focus_state_set(window);
+            }
+        }
+        // This is what we believe, not a request: the keyboard is where the OS has it,
+        // and the answer to this question says where that is.
+        engine.focus_stale = true;
     }
 
     /// Reading order of where two windows are: left to right, then top to bottom.
@@ -2150,6 +3246,12 @@ pub const Engine = struct {
 
     /// Brings every parked window back on screen before the manager exits.
     fn command_quit(engine: *Engine) void {
+        // Displays that are asleep are still where the windows are.
+        const asleep = engine.monitors_count == 0;
+        if (asleep) engine.monitors_count = engine.monitors_asleep;
+        defer if (asleep) {
+            engine.monitors_count = 0;
+        };
         for (&engine.windows) |*window| {
             if (window.id == 0 or !window.managed() or engine.monitors_count == 0) continue;
             if (engine.workspace_visible(window.workspace)) continue;
@@ -2159,6 +3261,7 @@ pub const Engine = struct {
             if (window.mode == .floating and window.float_rect.intersects(area)) {
                 frame = window.float_rect;
             }
+            frame = rect_sized(frame);
             engine.emit(.{ .set_frame = .{ .id = window.id, .pid = window.pid, .frame = frame } });
         }
         engine.emit(.quit);
@@ -2187,7 +3290,11 @@ pub const Engine = struct {
     fn workspace_resolve(engine: *Engine, target: command.Target) ?u8 {
         const current = engine.workspace_current();
         switch (target) {
-            .index => |number| return if (number <= workspaces_max) number - 1 else null,
+            .index => |number| {
+                if (number <= workspaces_max) return number - 1;
+                engine.fail("not-found: no workspace {d}", .{number});
+                return null;
+            },
             .label => |label| {
                 for (&engine.workspaces, 0..) |*workspace, index| {
                     const same = stdx.eql_ignore_case(workspace.label.slice(), label.slice());
@@ -2215,6 +3322,9 @@ pub const Engine = struct {
                     const offset = if (target == .next) step_index else workspaces_max - step_index;
                     const workspace: u8 = @intCast((current + offset) % workspaces_max);
                     if (engine.workspace_visible(workspace)) continue;
+                    // A hidden workspace of another monitor would show over there and take
+                    // focus with it, and the way back would skip the one that was left.
+                    if (engine.workspace_monitor(workspace) != engine.focused_monitor) continue;
                     if (!engine.workspace_empty(workspace)) return workspace;
                 }
                 return null;
@@ -2222,12 +3332,16 @@ pub const Engine = struct {
         }
     }
 
-    fn monitor_resolve(engine: *const Engine, target: command.Target) ?u8 {
+    fn monitor_resolve(engine: *Engine, target: command.Target) ?u8 {
         const count: u32 = engine.monitors_count;
         assert(count > 0);
         const current: u32 = engine.focused_monitor;
         switch (target) {
-            .index => |number| return if (number <= count) number - 1 else null,
+            .index => |number| {
+                if (number <= count) return number - 1;
+                engine.fail("not-found: no monitor {d}", .{number});
+                return null;
+            },
             .next => return if (count > 1) @intCast((current + 1) % count) else null,
             .prev => return if (count > 1) @intCast((current + count - 1) % count) else null,
             .recent => {
@@ -2583,6 +3697,7 @@ pub const Engine = struct {
             assert(window.workspace < workspaces_max);
             assert(engine.apps[window.app].pid == window.pid);
             assert(!window.sticky or window.mode == .floating);
+            assert(!window.auto_floated or window.mode == .floating);
             const leaf = engine.forest.leaf_find(window.id);
             assert(window.in_layout() == (leaf != node_none));
             if (leaf != node_none) {
@@ -2594,6 +3709,7 @@ pub const Engine = struct {
                 assert(leader.tab_of == 0);
                 assert(leader.pid == window.pid);
                 assert(leader.workspace == window.workspace);
+                assert(!window.sticky);
             }
             if (window.zoom == .parent) assert(window.in_layout());
             if (window.set_pending) assert(window.desired_valid);
@@ -2617,6 +3733,12 @@ pub const Engine = struct {
             }
         }
         assert(engine.focus_pending_count <= focus_pending_max);
+        for (engine.memories[0..engine.memories_count], 0..) |*memory, index| {
+            assert(memory.id != 0 and memory.pid != 0);
+            assert(memory.workspace < workspaces_max);
+            assert(memory.ratio >= tree.ratio_min and memory.ratio <= tree.ratio_max);
+            for (engine.memories[0..index]) |*other| assert(other.id != memory.id);
+        }
         engine.verify_monitors();
     }
 
