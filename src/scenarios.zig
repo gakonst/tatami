@@ -199,6 +199,88 @@ test "a zoomed window stays zoomed when another window takes focus" {
     try expect_frame(left_half, a);
 }
 
+test "an accordion stacks the tiles and focus steps through them in layout order" {
+    // Asked for: 'many overlapping windows and I can scroll through them with a key
+    // combination', as with AeroSpace's accordion layout.
+    const os = boot("");
+    const app = os.app_launch("Slack", "com.tinyspeck.slackmacgap");
+    const a = open(os, app, .{});
+    const b = open(os, app, .{});
+    const c = open(os, app, .{});
+    // Wider than a third of the screen: as a tile it would lie over its neighbour.
+    const wide = open(os, app, .{ .min_w = 800 });
+    os.settle();
+    os.command_run("toggle accordion");
+    os.settle();
+    for ([_]engine_module.WindowId{ a, b, c, wide }) |id| try expect_frame(screen, id);
+    try testing.expectEqual(wide, engine.focused_window);
+    const tree_text = run(os, "query tree", .{});
+    try testing.expect(std.mem.indexOf(u8, tree_text, "workspace 1 visible accordion\n") != null);
+    const line = "*1\tmonitor=1\tvisible\twindows=4\t-\taccordion\n";
+    try expect_reply(line, run(os, "query workspaces", .{}));
+    const listed = run(os, "query workspaces --json", .{});
+    try testing.expect(std.mem.indexOf(u8, listed, "\"accordion\":true") != null);
+    // South and east go on through the stack, north and west go back.
+    os.command_run("focus north");
+    try testing.expectEqual(c, engine.focused_window);
+    os.command_run("focus west");
+    os.command_run("focus west");
+    try testing.expectEqual(a, engine.focused_window);
+    os.command_run("focus north");
+    try testing.expectEqual(a, engine.focused_window);
+    os.command_run("focus north --wrap");
+    try testing.expectEqual(wide, engine.focused_window);
+    os.command_run("focus south --wrap");
+    try testing.expectEqual(a, engine.focused_window);
+    os.command_run("focus east");
+    try testing.expectEqual(b, engine.focused_window);
+    // Swap moves the window one place along the stack.
+    os.command_run("swap south");
+    os.command_run("focus north");
+    try testing.expectEqual(c, engine.focused_window);
+    os.settle();
+    try testing.expectEqual(c, os.focused);
+    // The tree was kept underneath: the tiles come back where they were, b and c traded.
+    os.command_run("toggle accordion");
+    os.settle();
+    try expect_frame(left_half, a);
+    try expect_frame(Rect.init(864, 38, 864, 540), c);
+    try testing.expect(!frame_of(b).eql(screen));
+}
+
+test "focus --wrap goes around an accordion even with a monitor that way" {
+    // Seen live: with a display below the main one, hyper-j (focus south --wrap) stopped at the
+    // last chat window and then went to the browser on the other display.
+    const os = boot("");
+    os.monitors_set(4); // The external display above, the laptop below it.
+    const laptop = engine.focused_monitor;
+    try testing.expect(engine.monitors[laptop].main);
+    const app = os.app_launch("Slack", "com.tinyspeck.slackmacgap");
+    const a = open(os, app, .{});
+    _ = open(os, app, .{});
+    const c = open(os, app, .{});
+    os.settle();
+    os.command_run("toggle accordion");
+    os.settle();
+    try testing.expectEqual(c, engine.focused_window);
+    os.command_run("focus south --wrap");
+    try testing.expectEqual(a, engine.focused_window);
+    os.command_run("focus north --wrap");
+    try testing.expectEqual(c, engine.focused_window);
+    os.command_run("focus north");
+    os.command_run("focus north");
+    try testing.expectEqual(a, engine.focused_window);
+    os.command_run("focus north --wrap");
+    try testing.expectEqual(c, engine.focused_window);
+    try testing.expectEqual(laptop, engine.focused_monitor);
+    // Without --wrap the end of the stack is an edge like any other, and the display
+    // above is that way.
+    os.command_run("focus north");
+    os.command_run("focus north");
+    os.command_run("focus north");
+    try testing.expect(engine.focused_monitor != laptop);
+}
+
 test "a hung application delays only its own windows" {
     // AeroSpace: 'restart aerospace it is very slow', and a CLI that hangs with it.
     const os = boot("");

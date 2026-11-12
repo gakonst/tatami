@@ -218,7 +218,7 @@ const commands = [_][]const u8{
     "query window",                     "query window 101 --json",    "query bindings --json",
     "query workspaces --json",          "query monitors --json",      "query focus --json",
     "query stats --json",               "query commands",             "query modes --json",
-    "float --bounds 0.25,0.25,0.5,0.5",
+    "float --bounds 0.25,0.25,0.5,0.5", "toggle accordion",
 };
 
 pub const Coverage = struct {
@@ -230,6 +230,7 @@ pub const Coverage = struct {
     main_moved: u32 = 0,
     disorder: u32 = 0,
     stale: u32 = 0,
+    stacked: u32 = 0,
 };
 
 pub const Simulator = struct {
@@ -1645,7 +1646,11 @@ pub const Simulator = struct {
         if (!simulator.engine.workspace_visible(known.workspace)) return false;
         if (known.frozen or window.stubborn) return false;
         // A tile that the gaps squeeze to nothing is still sent a frame one pixel wide,
-        // and that pixel lies on its neighbour.
+        // and that pixel lies on its neighbour. The tiles of an accordion fill the
+        // workspace whatever the hidden layout gives them.
+        if (simulator.engine.workspaces[known.workspace].accordion) {
+            return window.frame.eql(known.desired);
+        }
         const forest = &simulator.engine.forest;
         const rect = forest.nodes[forest.leaf_find(known.id)].rect;
         if (rect.w == 0 or rect.h == 0) return false;
@@ -1653,7 +1658,7 @@ pub const Simulator = struct {
     }
 
     /// The tiles of a workspace that shows lie inside the visible area of its display
-    /// and do not overlap each other.
+    /// and do not overlap each other, or, in an accordion, each one fills the workspace.
     fn check_tiles(simulator: *Simulator) void {
         const engine = simulator.engine;
         if (engine.monitors_count == 0) return;
@@ -1664,6 +1669,13 @@ pub const Simulator = struct {
             const frame = window.frame;
             assert(frame.x >= area.x and frame.right() <= area.right());
             assert(frame.y >= area.y and frame.bottom() <= area.bottom());
+            // The tiles of an accordion are stacked: each one fills the workspace.
+            if (engine.workspaces[known.workspace].accordion) {
+                const shown_on = engine.workspace_monitor(known.workspace);
+                assert(frame.eql(engine.workspace_rect(shown_on)));
+                simulator.coverage.stacked += 1;
+                continue;
+            }
             for (simulator.windows[0..index]) |*other| {
                 const beside = engine.window_find(other.id) orelse continue;
                 if (beside.workspace != known.workspace) continue;
