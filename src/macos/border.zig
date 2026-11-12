@@ -1,8 +1,9 @@
 //! The border of the focused window, as i3 draws one. macOS has no way to draw on another
 //! application's window, so the border is a window of tatami's own: borderless,
 //! transparent but for a ring just inside the focused window's frame, deaf to the mouse,
-//! and ordered directly above the focused window at its level. None of this needs SIP
-//! disabled or a private call.
+//! and one level above the focused window. At the window's own level any raise of it, as
+//! every click in it makes, would cover the border until it was ordered back, which shows
+//! as a flicker. None of this needs SIP disabled or a private call.
 //!
 //! The window server draws nothing for an application whose activation policy is
 //! prohibited, which is what a binary outside an app bundle gets, so tatami becomes an
@@ -191,7 +192,7 @@ pub fn show(target: u32, frame: Rect, style: Style, reorder: bool) void {
     if (!was_shown or !std.meta.eql(frame, shown.frame)) frame_set(frame);
     const level = if (target != shown.target) window_level(target) else shown.level;
     if (reorder or target != shown.target or !was_shown) {
-        if (level != shown.level or !was_shown) send_int(window, "setLevel:", level);
+        if (level != shown.level or !was_shown) send_int(window, "setLevel:", level + 1);
         send_order(window, order_above, target);
     }
     shown = .{ .target = target, .frame = frame, .level = level };

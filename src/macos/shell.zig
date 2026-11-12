@@ -42,10 +42,6 @@ const config_bytes_max: usize = 64 * 1024;
 /// An application raises a window a moment after it is asked to, which puts the window
 /// above its border: the border is ordered above it again after this long.
 const border_reorder_ms: u64 = 120;
-/// A click raises the window under it, even the focused one, which puts that window
-/// above its border with no Accessibility notification to tell: the border is ordered
-/// above it again this long after each mouse button goes down or up.
-const border_click_reorder_ms: u64 = 40;
 
 /// True while the applications that were already running are being picked up.
 var adopting: bool = false;
@@ -139,7 +135,6 @@ var config_scratch: Config = undefined;
 var config_bytes: [config_bytes_max]u8 = undefined;
 var own_pid: i32 = 0;
 var border_reorder_at_ms: u64 = 0;
-var mouse_tap: Ref = null;
 pub var verbose: bool = false;
 
 const Config = config_module.Config;
@@ -1618,7 +1613,6 @@ fn events_install() void {
         null,
         null,
     );
-    mouse_tap_install();
     _ = c.CGDisplayRegisterReconfigurationCallback(display_changed, null);
     const local = c.CFNotificationCenterGetLocalCenter();
     const distributed = c.CFNotificationCenterGetDistributedCenter();
@@ -1628,49 +1622,6 @@ fn events_install() void {
     const menu_bar = "AppleInterfaceMenuBarHidingChangedNotification";
     system_observe(distributed, observer_usable, menu_bar);
     system_observe(distributed, observer_unlocked, "com.apple.screenIsUnlocked");
-}
-
-/// Listens to mouse buttons, without changing or holding up any event, to put the
-/// border back above a window that a click raised.
-fn mouse_tap_install() void {
-    const types = [_]u32{
-        c.event_left_mouse_down,  c.event_left_mouse_up,
-        c.event_right_mouse_down, c.event_right_mouse_up,
-        c.event_other_mouse_down, c.event_other_mouse_up,
-    };
-    var mask: u64 = 0;
-    for (types) |event_type| mask |= @as(u64, 1) << @intCast(event_type);
-    mouse_tap = c.CGEventTapCreate(
-        c.event_tap_session,
-        c.event_tap_head_insert,
-        c.event_tap_listen_only,
-        mask,
-        mouse_button_event,
-        null,
-    );
-    if (mouse_tap == null) {
-        std.debug.print("tatami: no mouse event tap: the border may hide after a click\n", .{});
-        return;
-    }
-    const source = c.CFMachPortCreateRunLoopSource(null, mouse_tap, 0);
-    c.CFRunLoopAddSource(c.CFRunLoopGetMain(), source, c.kCFRunLoopCommonModes);
-    c.CFRelease(source);
-}
-
-fn mouse_button_event(proxy: Ref, event_type: u32, event: Ref, info: ?*anyopaque) callconv(.c) Ref {
-    _ = proxy;
-    _ = info;
-    if (event_type == c.event_tap_disabled_by_timeout or
-        event_type == c.event_tap_disabled_by_user_input)
-    {
-        if (mouse_tap != null) c.CGEventTapEnable(mouse_tap, true);
-        return event;
-    }
-    if (border.target_shown() == 0) return event;
-    const at = c.now_ms() + border_click_reorder_ms;
-    if (border_reorder_at_ms == 0 or border_reorder_at_ms < at) border_reorder_at_ms = at;
-    timer_rearm();
-    return event;
 }
 
 pub fn run() noreturn {
