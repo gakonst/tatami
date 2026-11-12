@@ -71,23 +71,28 @@ Static, checked by assertions, and reported in `tatami query stats` when hit.
 
 | Protocol | Use |
 |---|---|
-| Accessibility (AXUIElement, AXObserver) | Per app: window created, focused window changed, main window changed. Per window: destroyed, moved, resized, title changed, miniaturized, deminiaturized. Frames are read and written through position and size; focus through main, raise and frontmost. A frame whose size is already right is only moved, which is all a workspace switch needs. |
+| Accessibility (AXUIElement, AXObserver) | Per app: window created, focused window changed, main window changed, application hidden and shown (cmd-h takes its windows out of the layout as minimizing does). Native fullscreen has no notification of its own: it is read when a window reports a frame it was not sent to. Per window: destroyed, moved, resized, title changed, miniaturized, deminiaturized. Frames are read and written through position and size; focus through main, raise and frontmost. A frame whose size is already right is only moved, which is all a workspace switch needs. |
 | Accessibility messaging timeout | 250 ms for every call in the process. An app that hits it is suspended by the engine, so one hung app delays only its own windows. |
-| `AXEnhancedUserInterface` | Turned off around a frame change so apps driven by assistive software do not animate it. |
+| Windows that are announced early | Electron, Java and others announce a window before it has the role of one. It is looked at again after 150, 500 and 1500 ms. An application that was not ready, or not an ordinary application, at launch is tried again when it comes to the front, and its window list is read again then. |
+| `AXEnhancedUserInterface` | Turned off while frames are set, so apps driven by assistive software do not animate them: once per application for all the frames of a step, not around each one. |
 | `_AXUIElementGetWindow` (private) | The window id. The only private call. |
 | Carbon hot keys (`RegisterEventHotKey`) | Global bindings without an event tap or Input Monitoring permission. A registered key is consumed, so option-f cannot type "ƒ". Failures are printed, never silent. |
 | Carbon application events | Launched, terminated, front switched. |
-| Quartz display reconfiguration | Monitors added, removed, rearranged or asleep. Debounced. |
-| Mouse | The button state is polled every 30 ms only while a window is being dragged, to tell a drag in progress from a finished one. |
-| Secure Input (`IsSecureEventInputEnabled`) | Read at startup and by `tatami check`, with the process that holds it. While it is held, option-only hot keys cannot fire. |
-| Unix socket `/tmp/tatami-<uid>.sock` | One line in, one reply out. The client gives up after 2 s; the server reads with a 100 ms timeout. `exec` is refused over the socket. |
+| Quartz display reconfiguration | Monitors added, removed, rearranged or asleep. Debounced. While it lasts macOS moves windows about by itself; those reports are dropped and every frame is read once at the end. A display is known by its UUID, not by the number macOS gives it for the session, so workspaces find it again on another port. Mirrors are left out. |
+| Dock, menu bar and unlock notifications | `NSApplicationDidChangeScreenParametersNotification`, `com.apple.dock.prefchanged`, `AppleInterfaceMenuBarHidingChangedNotification` and `com.apple.screenIsUnlocked`: the usable area of each display is read again, and the engine is told only when it differs. |
+| Mouse | The button state is polled every 30 ms only while a window is being dragged, to tell a drag in progress from a finished one. A button held while the pointer is somewhere else is not a drag of this window. |
+| Secure Input (`IsSecureEventInputEnabled`) | Read at startup, at every application switch, at unlock and by `tatami check`, with the process that holds it. While it is held, option-only hot keys cannot fire; the log and `tatami events` say when it starts and ends. |
+| Unix socket `/tmp/tatami-<uid>.sock` | One line in, one reply out. The client gives up after 2 s; the server reads with a 100 ms timeout. `exec` is refused over the socket. A manager that finds another one answering on the socket does not start: two would fight over every window. |
+| State file `/tmp/tatami-<uid>.state` | Everything a user can see of the engine's state, one line per workspace and per window ([src/state.zig](../src/state.zig)): the display of each workspace and which ones show, and for each window its workspace, its place in the layout with the split and ratio, whether it floats and where, sticky, zoom, label, tab and focus order. Written two seconds after the layout changed and at quit, replaced in one step. The next start reads it before it looks at the windows, so a restart, an upgrade or a crash changes nothing: no window that was in view is sent a frame. A window is matched by id and process; lines that make no sense are skipped and the engine checks the rest, so a file from before a reboot, or from someone else, does no harm. |
 | Signals | SIGINT and SIGTERM restore parked windows and quit. On a fatal signal the process replaces itself with `tatami rescue`. |
 
 ## The simulator
 
 `tatami-sim <seed> <steps>` drives the real engine with a generated workload: apps and
 windows opening and closing, native tabs, dialogs and popups, every command in the language,
-monitors plugged and unplugged, minimize, user drags.
+monitors plugged and unplugged, minimize, user drags, native fullscreen, applications
+hidden and shown, displays that go to sleep, come back under another id, change their
+resolution in place or trade the menu bar.
 
 Faults it injects:
 
@@ -98,16 +103,32 @@ Faults it injects:
 - Titles that arrive late.
 - Windows that macOS lifts by 28, 32 or 40 pixels when they are parked below the screen
   (seen live: the title bar must stay reachable).
-- Notifications that are late, duplicated, or about windows that are gone.
+- Notifications that are late, duplicated, or about windows that are gone: focus that
+  moves on before a window is reported destroyed, a window reported destroyed or appeared
+  twice, an application reported gone before its windows are.
+- Windows on their way into or out of native fullscreen, which lose every frame they are
+  sent, and whose notification and frame change arrive in either order.
 
 After every quiet moment it asserts:
 
 - The engine's picture of every window's frame and minimized state is the real one.
 - Every managed window is exactly where the engine wants it, as far as its minimum size
   allows.
-- Hidden windows show at most a one pixel sliver.
+- Hidden windows show a sliver one pixel wide on their own display, and of the other
+  displays no more than the best of the four parking spots would show: nothing, wherever
+  a corner is free.
+- The tiles of a workspace that shows lie inside the visible area of its display and do
+  not overlap.
+- Every window that tiles has exactly one leaf, in the tree of its own workspace; a
+  window that is minimized, hidden with its application, in native fullscreen, floating
+  or a background tab has none.
+- The window that has focus is on screen: not minimized, not hidden with its application,
+  not on a hidden workspace. A sticky window is on a workspace that shows.
+- A display that is still there after the displays change shows the workspace it showed,
+  also under another id; only the workspace of the window in use comes first.
 - Popups are never tracked, and nothing else is missed.
-- No window is sent more than two frames for one event.
+- No window is sent more than two frames for one event, and going quiet costs a window
+  a bounded number of frames.
 - Engine focus and OS focus agree, unless the OS-focused window is on a hidden workspace or
   another monitor.
 - At the end, with every window closed, nothing is left: no windows, no tree nodes, no focus.

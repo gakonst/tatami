@@ -10,7 +10,8 @@ const c = @import("c.zig");
 const stdx = @import("../stdx.zig");
 
 pub const request_max: usize = 1024;
-pub const reply_max: usize = 40 * 1024;
+/// Room for the longest answer of the engine (engine.reply_max) and a line of our own.
+pub const reply_max: usize = 264 * 1024;
 pub const reply_timeout_ms: i32 = 2000;
 
 const Handler = *const fn (request: []const u8, reply: *stdx.Text) void;
@@ -52,6 +53,13 @@ pub fn server_open(on_request: Handler, on_quit: QuitHandler) void {
     quit_handler = on_quit;
     const where = address();
     socket_path = where.path;
+    // A client that left before its answer must not take the manager with it, and
+    // neither must a manager that left before ours.
+    _ = c.signal(13, c.sig_ign); // SIGPIPE
+    if (answered(&where)) {
+        std.debug.print("tatami: another tatami is running; this one will not start\n", .{});
+        c.exit(1);
+    }
     _ = c.unlink(@ptrCast(&socket_path));
     listen_fd = c.socket(c.af_unix, c.sock_stream, 0);
     assert(listen_fd >= 0);
@@ -60,14 +68,47 @@ pub fn server_open(on_request: Handler, on_quit: QuitHandler) void {
         c.exit(1);
     }
     _ = c.fcntl(listen_fd, c.f_setfl, c.o_nonblock);
-    // A client that left before its answer must not take the manager with it.
-    _ = c.signal(13, c.sig_ign); // SIGPIPE
+    // Not for the programs that exec starts, nor for 'tatami rescue' after a crash: a
+    // listener that one of them still held would take connections for a manager that
+    // is gone, and the next manager would find one running and not start.
+    _ = c.fcntl(listen_fd, c.f_setfd, c.fd_cloexec);
     listen_descriptor = watch(listen_fd, listen_ready);
     // Signals are turned into a byte on a pipe, so quitting runs on the run loop.
     const piped = c.pipe(&wake_fds);
     assert(piped == 0);
+    for (wake_fds) |fd| _ = c.fcntl(fd, c.f_setfd, c.fd_cloexec);
     wake_descriptor = watch(wake_fds[0], wake_ready);
 }
+
+/// Whether a manager listens on the socket already. Two of them would fight over every
+/// window, so the one that is there stays. It is asked a question, on one connection:
+/// connections that are only made wait in the queue of a manager that is busy, the
+/// queue holds sixteen, and macOS refuses the seventeenth exactly as it does when nobody
+/// listens. A manager that closes without an answer is on its way out, as when it is
+/// being restarted, and is given a few seconds to go.
+fn answered(where: *const c.SockaddrUn) bool {
+    var tries: u32 = 0;
+    while (tries < running_tries_max) : (tries += 1) {
+        const fd = c.socket(c.af_unix, c.sock_stream, 0);
+        if (fd < 0) return false;
+        defer _ = c.close(fd);
+        timeout_set(fd, running_answer_ms);
+        if (c.connect(fd, where, @sizeOf(c.SockaddrUn)) != 0) return false;
+        const asked_ms = c.now_ms();
+        const request = "query stats";
+        var reply: [64]u8 = undefined;
+        const sent = c.write(fd, request, request.len) > 0;
+        if (sent and c.read(fd, &reply, reply.len) > 0) return true;
+        // Silence for all that time is a manager that is there, and busy.
+        if (c.now_ms() - asked_ms >= running_answer_ms / 2) return true;
+        _ = c.usleep(running_wait_us);
+    }
+    return true;
+}
+
+const running_tries_max: u32 = 20;
+const running_wait_us: u32 = 150_000;
+const running_answer_ms: i32 = 3000;
 
 const Callout = *const fn (c.Ref, c.CFOptionFlags, ?*anyopaque) callconv(.c) void;
 
@@ -150,6 +191,8 @@ fn follow_request(text: []const u8) ?bool {
 fn follower_add(peer: c_int, json: bool) bool {
     if (followers_count == followers_max) return false;
     _ = c.fcntl(peer, c.f_setfl, c.o_nonblock);
+    // Or 'tatami events' would not see the manager go while such a program lives.
+    _ = c.fcntl(peer, c.f_setfd, c.fd_cloexec);
     followers[followers_count] = .{ .fd = peer, .json = json };
     followers_count += 1;
     return true;

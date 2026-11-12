@@ -46,6 +46,10 @@ pub const Names = struct {
     title_changed: Ref,
     miniaturized: Ref,
     deminiaturized: Ref,
+    hidden: Ref,
+    modal: Ref,
+    app_hidden: Ref,
+    app_shown: Ref,
 };
 
 pub var names: Names = undefined;
@@ -160,6 +164,10 @@ pub fn init() void {
         .title_changed = name("AXTitleChanged"),
         .miniaturized = name("AXWindowMiniaturized"),
         .deminiaturized = name("AXWindowDeminiaturized"),
+        .hidden = name("AXHidden"),
+        .modal = name("AXModal"),
+        .app_hidden = name("AXApplicationHidden"),
+        .app_shown = name("AXApplicationShown"),
     };
     const system_wide = c.AXUIElementCreateSystemWide();
     assert(system_wide != null);
@@ -168,7 +176,13 @@ pub fn init() void {
     c.CFRelease(system_wide);
 }
 
+/// Counts the calls that an application did not answer. Whoever asks one application
+/// several things in a row compares it before and after and stops at the first, since
+/// every further question would wait for the whole timeout again.
+pub var timeouts: u64 = 0;
+
 fn check(code: c.AXError) Error!void {
+    if (code == c.ax_cannot_complete) timeouts += 1;
     return switch (code) {
         c.ax_success => {},
         c.ax_cannot_complete => error.Unresponsive,
@@ -188,7 +202,7 @@ pub fn copy(element: Ref, attribute: Ref) Error!Ref {
 
 pub fn window_id(element: Ref) u32 {
     var id: c.CGWindowID = 0;
-    if (c._AXUIElementGetWindow(element, &id) != c.ax_success) return 0;
+    check(c._AXUIElementGetWindow(element, &id)) catch return 0;
     return id;
 }
 
@@ -240,6 +254,11 @@ pub fn frame_set(element: Ref, frame: Rect, move_only: bool) Error!Rect {
         if (moved.w == frame.w and moved.h == frame.h) return moved;
     }
     try size_set(element, frame.w, frame.h);
+    const applied = try frame_get(element);
+    if (applied.x == frame.x and applied.y == frame.y) return applied;
+    // A window that was too big for the place it was moved to stops short of it. Now
+    // that it has its size, it is asked once more.
+    try position_set(element, frame.x, frame.y);
     return frame_get(element);
 }
 
@@ -248,6 +267,28 @@ pub fn bool_get(element: Ref, attribute: Ref) bool {
     defer c.CFRelease(value);
     if (c.CFGetTypeID(value) != c.CFBooleanGetTypeID()) return false;
     return c.CFBooleanGetValue(value) != 0;
+}
+
+/// Like bool_get, for the caller that has to know when the application does not answer.
+pub fn bool_get_checked(element: Ref, attribute: Ref) Error!bool {
+    const value = try copy(element, attribute);
+    defer c.CFRelease(value);
+    if (c.CFGetTypeID(value) != c.CFBooleanGetTypeID()) return false;
+    return c.CFBooleanGetValue(value) != 0;
+}
+
+/// Like bool_set, for the caller that has to know when the application does not answer.
+pub fn bool_set_checked(element: Ref, attribute: Ref, value: bool) Error!void {
+    const boolean = if (value) c.kCFBooleanTrue else c.kCFBooleanFalse;
+    try check(c.AXUIElementSetAttributeValue(element, attribute, boolean));
+}
+
+/// False once the window behind the element is gone. An application that does not
+/// answer still has its windows.
+pub fn alive(element: Ref) bool {
+    const role = copy(element, names.role) catch |err| return err != error.Invalid;
+    c.CFRelease(role);
+    return true;
 }
 
 pub fn bool_set(element: Ref, attribute: Ref, value: bool) void {
@@ -293,7 +334,10 @@ pub fn window_kind(element: Ref) ?engine_module.WindowKind {
     if (!attribute_is(element, names.role, names.role_window)) return null;
     const subrole = copy(element, names.subrole) catch return .popup;
     defer c.CFRelease(subrole);
-    if (c.CFEqual(subrole, names.subrole_standard) != 0) return .standard;
+    if (c.CFEqual(subrole, names.subrole_standard) != 0) {
+        // Java and some cross-platform toolkits call their modal dialogs standard windows.
+        return if (bool_get(element, names.modal)) .dialog else .standard;
+    }
     if (c.CFEqual(subrole, names.subrole_dialog) != 0) return .dialog;
     if (c.CFEqual(subrole, names.subrole_system_dialog) != 0) return .dialog;
     if (c.CFEqual(subrole, names.subrole_floating) != 0) return .dialog;

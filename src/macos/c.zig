@@ -84,6 +84,24 @@ pub extern "c" fn CFFileDescriptorCreateRunLoopSource(
     order: CFIndex,
 ) Ref;
 
+pub const CFNotificationCallback = *const fn (
+    center: Ref,
+    observer: ?*anyopaque,
+    name: Ref,
+    object: ?*const anyopaque,
+    user_info: Ref,
+) callconv(.c) void;
+pub const notification_deliver_immediately: CFIndex = 4;
+pub extern "c" fn CFNotificationCenterGetLocalCenter() Ref;
+pub extern "c" fn CFNotificationCenterGetDistributedCenter() Ref;
+pub extern "c" fn CFNotificationCenterAddObserver(
+    center: Ref,
+    observer: ?*const anyopaque,
+    callback: CFNotificationCallback,
+    name: Ref,
+    object: ?*const anyopaque,
+    suspension_behavior: CFIndex,
+) void;
 pub extern "c" const kCFBooleanTrue: Ref;
 pub extern "c" const kCFBooleanFalse: Ref;
 pub extern "c" const kCFRunLoopCommonModes: Ref;
@@ -150,6 +168,10 @@ pub const window_list_exclude_desktop: u32 = 16;
 pub extern "c" fn CGGetActiveDisplayList(max: u32, displays: [*]CGDirectDisplayID, count: *u32) i32;
 pub extern "c" fn CGDisplayBounds(display: CGDirectDisplayID) CGRect;
 pub extern "c" fn CGMainDisplayID() CGDirectDisplayID;
+pub extern "c" fn CGDisplayMirrorsDisplay(display: CGDirectDisplayID) CGDirectDisplayID;
+pub const CFUUIDBytes = extern struct { bytes: [16]u8 };
+pub extern "c" fn CGDisplayCreateUUIDFromDisplayID(display: CGDirectDisplayID) Ref;
+pub extern "c" fn CFUUIDGetUUIDBytes(uuid: Ref) CFUUIDBytes;
 pub extern "c" fn CGDisplayRegisterReconfigurationCallback(
     callback: *const fn (
         display: CGDirectDisplayID,
@@ -274,6 +296,17 @@ pub const sol_socket: c_int = 0xffff;
 pub const so_sndtimeo: c_int = 0x1005;
 pub const so_rcvtimeo: c_int = 0x1006;
 pub const o_nonblock: c_int = 0x0004;
+pub const o_wronly: c_int = 0x0001;
+pub const o_nofollow: c_int = 0x0100;
+pub const o_creat: c_int = 0x0200;
+pub const o_trunc: c_int = 0x0400;
+pub const o_excl: c_int = 0x0800;
+pub extern "c" fn rename(from: [*:0]const u8, to: [*:0]const u8) c_int;
+pub extern "c" fn kill(pid: c_int, signal_number: c_int) c_int;
+pub extern "c" fn __error() *c_int;
+pub const esrch: c_int = 3;
+pub const f_setfd: c_int = 2;
+pub const fd_cloexec: c_int = 1;
 pub const f_setfl: c_int = 4;
 pub const clock_monotonic: c_int = 6;
 pub const sig_ign: usize = 1;

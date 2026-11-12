@@ -23,11 +23,17 @@ Checked live, each against an independent Accessibility read of every window:
 - Resizing a tile with the mouse.
 - Hot keys with cmd in them (focus, warp), pressed by hand.
 - `tatami quit`.
+- A restart, and a kill followed by a start: no window was sent a frame, and the layout,
+  the split, the zoom and the focus were the same before and after.
+- A second `tatami start` while one runs: refused.
 
 Not checked live yet: hot keys that use only option or option-shift (Secure Input was on
 during the trial, see [docs/INSTALL.md](docs/INSTALL.md)), `tatami rescue` with windows
 actually parked, binding modes, more than one display, native tabs, sticky windows, rules,
-applications that hang.
+applications that hang, and what the shell does about native fullscreen, cmd-h, windows
+that are announced early, displays that are replugged and a Dock that moves.
+[docs/EDGE-CASES.md](docs/EDGE-CASES.md) says for every case whether a test shows it or
+only the code does.
 
 Measured live, from the command line including process start: focus 15 to 55 ms, workspace
 switch 45 to 100 ms. Almost all of it is the applications answering Accessibility calls;
@@ -74,6 +80,7 @@ tatami events           # follow what changes, one line per event
 tatami wait 186         # return when window 186 closes
 tatami reload           # re-read the config; a file with errors is rejected as a whole
 tatami quit             # brings every parked window back, then exits
+tatami start            # the next start finds every window in its tile, on its workspace
 tatami rescue           # the same, without a running daemon
 tatami bench            # engine latency per command
 tatami default-config   # print the built-in configuration
@@ -82,6 +89,9 @@ tatami default-config   # print the built-in configuration
 The configuration is one file, `~/.config/tatami/tatami.conf`. Without it the built-in
 [src/default.conf](src/default.conf) applies: the yabai/skhd bindings, with option-N to
 switch workspace and option-shift-N to send a window there.
+
+Keys are named as in skhd (`return`, `pageup`, `f13`, `kp5`, ...), and any key can be
+given by its code: `bind alt-0x32 : ...`. A hot key that macOS refuses is named in the log.
 
 Binding modes work as in AeroSpace: `bind mode:<name> <chord> : <command>` binds a key only
 while that mode is active, and `mode <name>` switches (also `tatami mode main` from the
@@ -95,6 +105,11 @@ a label: `swap 186 logs`, `move logs right editor --ratio 30`, `zoom editor --on
 Rex's; [docs/REX.md](docs/REX.md) lists what was taken and what was not. Every command
 ends with the same statuses: 0 done, 1 failed, 2 not a command, 3 no such window or
 workspace, 4 the manager is not running.
+
+Every failure that could be found in the issue trackers of AeroSpace, yabai, skhd, i3, sway,
+Amethyst, Rectangle, Hammerspoon and komorebi has a row in
+[docs/EDGE-CASES.md](docs/EDGE-CASES.md): what tatami does about it and the test that
+shows it.
 
 ## What it does not do
 

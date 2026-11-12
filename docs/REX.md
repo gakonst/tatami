@@ -64,6 +64,7 @@ line whole is dropped rather than waited for.
 | `view_changed <revision>` | `{"type":"view_changed","revision":57}` | Anything a query can show changed. Ask `query tree` for it. |
 | `mode_changed <name>` | `{"type":"mode_changed","mode":"service"}` | The set of key bindings changed. |
 | `config_reloaded` | `{"type":"config_reloaded"}` | The configuration was read again. |
+| `secure_input_on`, `secure_input_off` | `{"type":"secure_input_on"}` | Secure Input was taken or given back. While it is on, hot keys with only option or option-shift do not fire. |
 | `overflow` | `{"type":"overflow"}` | One step changed more than 15 things: query again. |
 
 Events carry ids, never titles.

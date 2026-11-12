@@ -152,6 +152,7 @@ after any workload and comparing what the user sees before and after. Four of th
 | More displays than the manager follows tripped an assert. | "sixteen displays are more than the manager follows, and it keeps working" |
 | A quit while the displays slept left the windows of hidden workspaces parked, with nothing running to bring them back. | "a quit while the displays sleep still brings the hidden windows back into view" |
 | A tab dragged out of a group on a hidden workspace floated in the corner it was parked in. | "a window floated while its workspace is hidden floats in view when it is shown" |
+| Windows of processes that had ended without a notice were followed for ever (seen live: seven of them). The shell now lets go of an application whose process is gone. | (shell, not run under test) |
 | `query windows` could call a tiled window auto-floated. | "a window that is tiled again is no longer said to be auto-floated" |
 
 ## Open
