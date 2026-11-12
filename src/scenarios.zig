@@ -786,6 +786,22 @@ test "a step says what it changed" {
     try testing.expectEqual(@as(usize, 0), engine.notes_slice().len);
 }
 
+test "a title change is a step's note, and only when the title is new" {
+    const os = boot("");
+    const app = os.app_launch("Zed", "dev.zed.Zed");
+    const a = open(os, app, .{});
+    os.settle();
+    os.window_title(a, "main.zig");
+    os.settle();
+    var notes = engine.notes_slice();
+    try testing.expectEqual(@as(usize, 1), notes.len);
+    try testing.expectEqual(engine_module.Note{ .title_changed = a }, notes[0]);
+    os.window_title(a, "main.zig");
+    os.settle();
+    notes = engine.notes_slice();
+    try testing.expectEqual(@as(usize, 0), notes.len);
+}
+
 test "windows found at startup are laid out once, in the order they sit on screen" {
     const os = boot("");
     const app = os.app_launch("Zed", "dev.zed.Zed");

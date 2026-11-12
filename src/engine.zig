@@ -223,6 +223,8 @@ pub const Note = union(enum) {
     window_closed: WindowId,
     /// The window that has focus now, or 0 when none has.
     focus_changed: WindowId,
+    /// A window's title changed. The id only: ask a query for the title.
+    title_changed: WindowId,
     /// The workspace in use now, counting from one.
     workspace_changed: u8,
     /// Anything about the layout changed: the new revision.
@@ -1949,7 +1951,13 @@ pub const Engine = struct {
 
     fn on_title_changed(engine: *Engine, id: WindowId, title: []const u8) void {
         const window = engine.window_find(id) orelse return;
+        var before: [title_max]u8 = undefined;
+        const before_len = window.title_len;
+        @memcpy(before[0..before_len], window.title[0..before_len]);
         window.title_set(title);
+        if (!std.mem.eql(u8, before[0..before_len], window.title[0..window.title_len])) {
+            engine.note(.{ .title_changed = id });
+        }
         if (engine.now_ms - window.appeared_ms > rule_grace_ms) return;
         const origin = window.workspace;
         engine.rules_apply(window, false);
