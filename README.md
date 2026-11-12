@@ -111,6 +111,14 @@ Amethyst, Rectangle, Hammerspoon and komorebi has a row in
 [docs/EDGE-CASES.md](docs/EDGE-CASES.md): what tatami does about it and the test that
 shows it.
 
+## Bar
+
+An optional bar over the menu bar, with the workspaces, the focused window's title, chosen
+menu-bar apps, the battery and the clock: [bar/README.md](bar/README.md). It is a separate
+program in Swift that only uses tatami's command line, so tatami itself still builds with
+Zig alone. Without a configuration it follows the system appearance; every colour, the
+font, the logo, the clock and the tray are set in `~/.config/tatami/bar.conf`.
+
 ## What it does not do
 
 - No window borders, opacity, topmost or picture-in-picture: those need SIP disabled.
