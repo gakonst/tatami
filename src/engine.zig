@@ -118,6 +118,8 @@ pub const WorkspaceMemory = struct {
     recent: bool = false,
     /// Its gaps were toggled.
     gaps: bool = false,
+    /// Its tiles were stacked as an accordion.
+    accordion: bool = false,
     label: command.Label = .{},
 };
 
@@ -357,6 +359,9 @@ pub const Workspace = struct {
     /// The share of the split that the next window gets, with insert. 0 is an even split.
     insert_percent: u8 = 0,
     gaps_toggled: bool = false,
+    /// Every tile fills the workspace, stacked; focus and swap walk the stack in layout
+    /// order. The tree stays as it is underneath, so turning it off brings the tiles back.
+    accordion: bool = false,
     label: command.Label = .{},
     /// The display change before which this workspace was last seen showing on a monitor,
     /// 0 for never. A display that comes back shows what it showed when it went away.
@@ -586,6 +591,7 @@ pub const Engine = struct {
         for (&engine.workspaces) |*workspace| {
             for (workspace.label.slice()) |byte| hash = hash_mix(hash, byte);
             hash = hash_mix(hash, 0xff);
+            hash = hash_mix(hash, @intFromBool(workspace.accordion));
         }
         return hash_mix(hash, engine.focused_window);
     }
@@ -829,6 +835,7 @@ pub const Engine = struct {
             workspace.display = memory.display;
             workspace.shown_seq = if (memory.shown) engine.shown_seq else 0;
             workspace.gaps_toggled = memory.gaps;
+            workspace.accordion = memory.accordion;
             workspace.label = label_checked(memory.label);
             if (memory.focused) current = memory.workspace;
             if (memory.recent) engine.recent_workspace = memory.workspace;
@@ -952,6 +959,7 @@ pub const Engine = struct {
                 .focused = known.len > 0 and index == engine.workspace_current(),
                 .recent = index == engine.recent_workspace,
                 .gaps = workspace.gaps_toggled,
+                .accordion = workspace.accordion,
                 .label = workspace.label,
             };
         }
@@ -2215,6 +2223,12 @@ pub const Engine = struct {
         assert(window.in_layout());
         const leaf = engine.forest.leaf_find(window.id);
         const old = window.desired;
+        if (engine.stacked(window)) {
+            // The tiles under the pointer are the hidden layout: only a drop on another
+            // monitor counts, and the window snaps back from anything else.
+            if (!frame.same_size(old)) return;
+            return engine.tile_drop_elsewhere(window, frame.center_x(), frame.center_y());
+        }
         if (frame.same_size(old)) {
             // Dropped on another tiled window: trade places with it.
             const x = frame.center_x();
@@ -2390,11 +2404,18 @@ pub const Engine = struct {
         if (window.mode == .floating) return rect_sized(window.float_rect);
         const leaf = engine.forest.leaf_find(window.id);
         assert(leaf != node_none);
+        if (engine.stacked(window)) return tile_sized(area, area);
         const node = &engine.forest.nodes[leaf];
         if (window.zoom == .parent and node.parent != node_none) {
             return tile_sized(engine.forest.nodes[node.parent].rect, area);
         }
         return tile_sized(node.rect, area);
+    }
+
+    /// A tile of an accordion: it fills the workspace, and has an order but no place or
+    /// size of its own.
+    fn stacked(engine: *const Engine, window: *const Window) bool {
+        return window.in_layout() and engine.workspaces[window.workspace].accordion;
     }
 
     fn rect_sized(rect: Rect) Rect {
@@ -2554,6 +2575,7 @@ pub const Engine = struct {
             .resize_ratio => |percent| {
                 const window = engine.focused() orelse return true;
                 if (!window.in_layout() or window.zoom != .none) return true;
+                if (engine.stacked(window)) return true;
                 engine.forest.share_set(engine.forest.leaf_find(window.id), percent);
             },
             .zoom => |zoom| engine.command_zoom(zoom.window, zoom.state),
@@ -2638,12 +2660,14 @@ pub const Engine = struct {
         engine.workspace_focus(window.workspace);
     }
 
-    /// With nothing that way, focus goes around to the far end of the other side.
+    /// With nothing that way, focus goes around to the far end of the other side. In an
+    /// accordion it goes around the stack, also when a monitor lies that way: the stack is
+    /// one place on the screen, and going through it is a cycle.
     fn command_focus_wrap(engine: *Engine, direction: Direction) void {
         const window = engine.focused() orelse return engine.command_focus(direction);
         const from = engine.workspace_monitor(window.workspace);
         const onward = engine.neighbor(window, direction, false) != null or
-            engine.monitor_neighbor(from, direction) != null;
+            (!engine.stacked(window) and engine.monitor_neighbor(from, direction) != null);
         if (onward) return engine.command_focus(direction);
         var target = window;
         var steps: u32 = 0;
@@ -2798,12 +2822,16 @@ pub const Engine = struct {
 
     fn nav_rect(engine: *const Engine, window: *const Window) Rect {
         if (!window.in_layout()) return window.float_rect;
+        // Every tile of an accordion is where the whole layout is.
+        const root = engine.workspaces[window.workspace].root;
+        if (engine.stacked(window)) return engine.forest.nodes[root].rect;
         return engine.forest.nodes[engine.forest.leaf_find(window.id)].rect;
     }
 
     /// The closest window in a direction on the same workspace. Ties go to the window that
     /// had focus most recently.
     fn neighbor(engine: *Engine, window: *Window, direction: Direction, tiled_only: bool) ?*Window {
+        if (engine.stacked(window)) return engine.accordion_neighbor(window, direction);
         const origin = engine.nav_rect(window);
         const across: geometry.Axis = if (direction.axis() == .x) .y else .x;
         var best: ?*Window = null;
@@ -2829,6 +2857,21 @@ pub const Engine = struct {
             }
         }
         return best;
+    }
+
+    /// In an accordion every tile has the same place, so a direction is a step through the
+    /// stack in layout order: west and north to the one before, east and south to the next.
+    fn accordion_neighbor(engine: *Engine, window: *Window, direction: Direction) ?*Window {
+        const forest = &engine.forest;
+        const root = engine.workspaces[window.workspace].root;
+        const leaf = forest.leaf_find(window.id);
+        assert(leaf != node_none);
+        const target = if (direction.is_leading())
+            forest.leaf_prev(root, leaf)
+        else
+            forest.leaf_next(root, leaf);
+        if (target == node_none) return null;
+        return engine.window_find(forest.nodes[target].window).?;
     }
 
     fn monitor_neighbor(engine: *const Engine, from: u8, direction: Direction) ?u8 {
@@ -2887,6 +2930,8 @@ pub const Engine = struct {
     fn command_warp(engine: *Engine, direction: Direction) void {
         const window = engine.focused() orelse return;
         if (!window.in_layout()) return;
+        // A stack has an order and no sides: warp trades places along it, as swap does.
+        if (engine.stacked(window)) return engine.command_swap(direction);
         const target = engine.neighbor(window, direction, true) orelse {
             const from = engine.workspace_monitor(window.workspace);
             if (engine.monitor_neighbor(from, direction) != null) {
@@ -2938,7 +2983,7 @@ pub const Engine = struct {
 
     fn command_resize(engine: *Engine, edge: Direction, delta: i32) void {
         const window = engine.focused() orelse return;
-        if (!window.in_layout() or window.zoom != .none) return;
+        if (!window.in_layout() or window.zoom != .none or engine.stacked(window)) return;
         const leaf = engine.forest.leaf_find(window.id);
         const gap = engine.gap_inner(window.workspace);
         if (engine.forest.resize_edge(leaf, edge, delta, gap)) return;
@@ -3176,15 +3221,16 @@ pub const Engine = struct {
     }
 
     fn command_toggle(engine: *Engine, what: command.Toggle) void {
-        if (what == .gaps) {
+        if (what == .gaps or what == .accordion) {
             const workspace = &engine.workspaces[engine.workspace_current()];
-            workspace.gaps_toggled = !workspace.gaps_toggled;
+            if (what == .gaps) workspace.gaps_toggled = !workspace.gaps_toggled;
+            if (what == .accordion) workspace.accordion = !workspace.accordion;
             return;
         }
         const window = engine.focused() orelse return;
         if (!window.managed()) return;
         switch (what) {
-            .gaps => unreachable,
+            .gaps, .accordion => unreachable,
             .split => {
                 if (window.in_layout()) {
                     _ = engine.forest.toggle_split(engine.forest.leaf_find(window.id));
@@ -3505,15 +3551,19 @@ pub const Engine = struct {
                 text.print("{{\"index\":{d},\"focused\":{s},\"visible\":{s},\"monitor\":{d}", .{
                     workspace + 1, bool_name(current), bool_name(visible), monitor,
                 });
-                text.print(",\"windows\":{d},\"label\":", .{count});
+                text.print(",\"windows\":{d},\"accordion\":{s},\"label\":", .{
+                    count, bool_name(engine.workspaces[workspace].accordion),
+                });
                 text.json_string(label);
                 text.append("}");
             } else {
                 const mark: u8 = if (current) '*' else ' ';
                 const shown = if (visible) "visible" else "hidden";
                 const name = if (label.len > 0) label else "-";
-                text.print("{c}{d}\tmonitor={d}\t{s}\twindows={d}\t{s}\n", .{
-                    mark, workspace + 1, monitor, shown, count, name,
+                // After the label, so that the columns before it stay where they were.
+                const accordion = if (engine.workspaces[workspace].accordion) "\taccordion" else "";
+                text.print("{c}{d}\tmonitor={d}\t{s}\twindows={d}\t{s}{s}\n", .{
+                    mark, workspace + 1, monitor, shown, count, name, accordion,
                 });
             }
             listed += 1;
@@ -3621,7 +3671,11 @@ pub const Engine = struct {
         const forest = &engine.forest;
         const root = engine.workspaces[workspace].root;
         const visible = engine.workspace_visible(workspace);
-        text.print("workspace {d} {s}\n", .{ workspace + 1, if (visible) "visible" else "hidden" });
+        text.print("workspace {d} {s}{s}\n", .{
+            workspace + 1,
+            if (visible) "visible" else "hidden",
+            if (engine.workspaces[workspace].accordion) " accordion" else "",
+        });
         var index = root;
         var steps: u32 = 0;
         while (index != node_none) : (index = forest.next(root, index)) {
@@ -3648,6 +3702,7 @@ pub const Engine = struct {
         text.print("{{\"index\":{d},\"visible\":{s}", .{ workspace + 1, bool_name(visible) });
         text.append(",\"label\":");
         text.json_string(engine.workspaces[workspace].label.slice());
+        text.print(",\"accordion\":{s}", .{bool_name(engine.workspaces[workspace].accordion)});
         text.append(",\"layout\":");
         engine.layout_json(text, engine.workspaces[workspace].root);
         text.append(",\"floating\":[");
