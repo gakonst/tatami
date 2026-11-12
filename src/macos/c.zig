@@ -192,6 +192,7 @@ pub extern "c" fn CGEventGetLocation(event: Ref) CGPoint;
 pub extern "c" fn CGWarpMouseCursorPosition(point: CGPoint) i32;
 pub extern "c" fn CGWindowListCopyWindowInfo(option: u32, relative_to: CGWindowID) Ref;
 pub extern "c" const kCGWindowNumber: Ref;
+pub extern "c" const kCGWindowLayer: Ref;
 
 // Carbon (HIToolbox): global hot keys and application launch and termination events.
 
@@ -356,3 +357,8 @@ pub fn now_us() u64 {
     std.debug.assert(result == 0);
     return @as(u64, @intCast(time.sec)) * 1_000_000 + @as(u64, @intCast(time.nsec)) / 1000;
 }
+
+// CoreGraphics colours, for the border's own window.
+
+pub extern "c" fn CGColorCreateSRGB(r: f64, g: f64, b: f64, a: f64) Ref;
+pub extern "c" fn CGColorRelease(color: Ref) void;

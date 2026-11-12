@@ -7,6 +7,7 @@ const assert = std.debug.assert;
 const c = @import("c.zig");
 const ax = @import("ax.zig");
 const ipc = @import("ipc.zig");
+const border = @import("border.zig");
 const stdx = @import("../stdx.zig");
 const geometry = @import("../geometry.zig");
 const command = @import("../command.zig");
@@ -38,6 +39,9 @@ const probes_max: u32 = 16;
 const probe_delays_ms = [_]u64{ 150, 500, 1500 };
 const state_debounce_ms: u64 = 2000;
 const config_bytes_max: usize = 64 * 1024;
+/// An application raises a window a moment after it is asked to, which puts the window
+/// above its border: the border is ordered above it again after this long.
+const border_reorder_ms: u64 = 120;
 
 /// True while the applications that were already running are being picked up.
 var adopting: bool = false;
@@ -130,6 +134,7 @@ var mode_current: u8 = 0;
 var config_scratch: Config = undefined;
 var config_bytes: [config_bytes_max]u8 = undefined;
 var own_pid: i32 = 0;
+var border_reorder_at_ms: u64 = 0;
 pub var verbose: bool = false;
 
 const Config = config_module.Config;
@@ -197,7 +202,36 @@ fn dispatch(event: Event) void {
         });
     }
     dispatching = false;
+    border_refresh(event != .tick);
     timer_rearm();
+}
+
+/// Puts the border around the focused window, or takes it away when that window does not
+/// show: none has focus, it is minimized, hidden, in native fullscreen, on a workspace
+/// that does not show, or being dragged.
+fn border_refresh(reorder: bool) void {
+    const config = &engine.config;
+    const style = border.Style{
+        .width = config.border_width,
+        .radius = config.border_radius,
+        .color = config.border_color,
+    };
+    const id = engine.focused_window;
+    const target = if (id == 0) null else engine.window_find(id);
+    const shows = if (target) |window|
+        window.focusable() and !window.fullscreen and !app_hidden(window.pid) and
+            (window.sticky or engine.workspace_visible(window.workspace)) and
+            !(if (window_find(id)) |shell_window| shell_window.dragging else true)
+    else
+        false;
+    if (!shows or style.width == 0) {
+        border.hide();
+        border_reorder_at_ms = 0;
+        return;
+    }
+    const before = border.target_shown();
+    border.show(id, target.?.actual, style, reorder);
+    if (before != id) border_reorder_at_ms = c.now_ms() + border_reorder_ms;
 }
 
 fn process(event: Event) void {
@@ -1270,6 +1304,10 @@ fn timer_fired(fired: Ref, info: ?*anyopaque) callconv(.c) void {
         state_write();
     }
     if (repeat_at_ms != 0 and repeat_at_ms <= now) repeat_fire(now);
+    if (border_reorder_at_ms != 0 and border_reorder_at_ms <= now) {
+        border_reorder_at_ms = 0;
+        border_refresh(true);
+    }
     if (engine.next_deadline_ms()) |deadline| {
         if (deadline <= c.now_ms()) dispatch(.tick);
     }
@@ -1282,7 +1320,7 @@ fn timer_rearm() void {
     if (quit_requested) next = 1;
     const extras = [_]u64{
         drag_poll_at_ms,        monitors_dirty_at_ms, repeat_at_ms,
-        monitors_recheck_at_ms, state_dirty_at_ms,
+        monitors_recheck_at_ms, state_dirty_at_ms,    border_reorder_at_ms,
     };
     for (extras) |at| {
         if (at != 0 and (next == null or at < next.?)) next = at;
@@ -1625,6 +1663,7 @@ pub fn run() noreturn {
     state_read();
     apps_adopt();
     focus_notify();
+    border_refresh(true);
 
     events_install();
     hot_keys_register();

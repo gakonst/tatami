@@ -119,9 +119,20 @@ program in Swift that only uses tatami's command line, so tatami itself still bu
 Zig alone. Without a configuration it follows the system appearance; every colour, the
 font, the logo, the clock and the tray are set in `~/.config/tatami/bar.conf`.
 
+## Border
+
+The focused window gets a border, as in i3: `border width 3`, `border radius 12` and
+`border color 4c7899` (RRGGBB or AARRGGBB) in the config; `border width 0` turns it off.
+It is a transparent window of tatami's own, ordered just above the focused window and
+deaf to the mouse, so it needs no SIP change and no permission beyond Accessibility. It
+hides while the window is dragged, minimized, hidden, in native fullscreen or on a
+workspace that does not show. tatami becomes an accessory application to show it (no Dock
+icon, no menu bar), because macOS draws nothing for a bare binary's windows.
+
 ## What it does not do
 
-- No window borders, opacity, topmost or picture-in-picture: those need SIP disabled.
+- No opacity, topmost or picture-in-picture: those need SIP disabled. The border of the
+  focused window does not: it is a window of tatami's own over the focused one.
 - Workspaces are virtual: hidden windows are parked in a corner, as in AeroSpace. Native
   Spaces are left alone.
 
