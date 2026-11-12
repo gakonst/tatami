@@ -259,13 +259,13 @@ fn notes_publish() void {
     for (engine.notes_slice()) |note| {
         const name = @tagName(note);
         const value: u64 = switch (note) {
-            .window_created, .window_closed, .focus_changed => |id| id,
+            .window_created, .window_closed, .focus_changed, .title_changed => |id| id,
             .workspace_changed => |workspace| workspace,
             .view_changed => |revision| revision,
             .overflow => 0,
         };
         const key = switch (note) {
-            .window_created, .window_closed, .focus_changed => "window",
+            .window_created, .window_closed, .focus_changed, .title_changed => "window",
             .workspace_changed => "workspace",
             .view_changed => "revision",
             .overflow => "",

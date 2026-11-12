@@ -6,8 +6,8 @@
 // underneath; move the mouse away and it comes back. Hidden while the focused window is
 // native fullscreen.
 //
-// It talks to tatami only through its command line: "tatami events --json" for instant
-// redraws and "tatami query ... --json" for the rest. Configuration is read from
+// It talks to tatami through its control socket, as "tatami <command>" does: "events
+// --json" for instant redraws and "query ... --json" for the rest. Configuration is read from
 // ~/.config/tatami/bar.conf (see bar/README.md); without one it follows the system
 // appearance. "tatami-bar check" validates the file; SIGHUP reloads it.
 import Cocoa
@@ -433,7 +433,7 @@ final class Bar: NSObject, NSApplicationDelegate {
         panel.hidesOnDeactivate = false
         panel.isMovable = false
         panel.contentView = view
-        view.onPick = { n in self.show(n); DispatchQueue.global().async { _ = self.run(["workspace", "\(n)"]) } }
+        view.onPick = { n in self.show(n); DispatchQueue.global().async { _ = self.ask("workspace \(n)") } }
         view.onHover = { outside in self.hover(outside) }
         view.onTray = { id in self.pressTray(id) }
         layout()
@@ -535,71 +535,122 @@ final class Bar: NSObject, NSApplicationDelegate {
         view.needsDisplay = true
     }
 
-    func run(_ args: [String]) -> Data? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: tatami)
-        p.arguments = args
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        p.standardInput = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return p.terminationStatus == 0 ? data : nil
+    // tatami's control socket, the one "tatami <command>" uses: the request goes out, the
+    // reply comes back until the socket closes. A few milliseconds, against tens of
+    // milliseconds to start a process, and nothing runs on the main thread.
+    static let socketPath = "/tmp/tatami-\(getuid()).sock"
+
+    func connect(_ request: String, follow: Bool) -> Int32? {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        if fd < 0 { return nil }
+        var tv = timeval(tv_sec: 2, tv_usec: 0)
+        let tvSize = socklen_t(MemoryLayout<timeval>.size)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, tvSize)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, tvSize)
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let path = Array(Bar.socketPath.utf8)
+        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
+            for (i, b) in path.prefix(buf.count - 1).enumerated() { buf[i] = b }
+        }
+        let connected = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        let bytes = Array(request.utf8)
+        if connected != 0 || write(fd, bytes, bytes.count) != bytes.count { close(fd); return nil }
+        if follow {
+            var forever = timeval(tv_sec: 0, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &forever, tvSize)
+        }
+        return fd
     }
 
-    func json(_ args: [String]) -> [String: Any]? {
-        guard let d = run(args) else { return nil }
+    func ask(_ request: String) -> Data? {
+        guard let fd = connect(request, follow: false) else { return nil }
+        defer { close(fd) }
+        var data = Data()
+        var buf = [UInt8](repeating: 0, count: 65536)
+        while true {
+            let n = read(fd, &buf, buf.count)
+            if n <= 0 { break }
+            data.append(buf, count: n)
+        }
+        if data.isEmpty || data.starts(with: Array("error".utf8)) { return nil }
+        return data
+    }
+
+    func json(_ request: String) -> [String: Any]? {
+        guard let d = ask(request) else { return nil }
         return (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
     }
 
-    // Follows "tatami events --json" and redraws on every event; restarts it if it exits.
+    // Follows "events --json" on the socket and redraws on every event; reconnects if
+    // tatami goes away.
     func follow() {
         while true {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: tatami)
-            p.arguments = ["events", "--json"]
-            let out = Pipe()
-            p.standardOutput = out
-            p.standardError = FileHandle.nullDevice
-            p.standardInput = FileHandle.nullDevice
-            var buffer = Data()
-            out.fileHandleForReading.readabilityHandler = { h in
-                let chunk = h.availableData
-                if chunk.isEmpty { return }
-                buffer.append(chunk)
-                var lines: [Data] = []
-                while let nl = buffer.firstIndex(of: 0x0a) {
-                    lines.append(buffer.subdata(in: buffer.startIndex..<nl))
-                    buffer.removeSubrange(buffer.startIndex...nl)
+            if let fd = connect("events --json", follow: true) {
+                schedule()
+                var buffer = Data()
+                var buf = [UInt8](repeating: 0, count: 4096)
+                while true {
+                    let n = read(fd, &buf, buf.count)
+                    if n <= 0 { break }
+                    buffer.append(buf, count: n)
+                    var events: [[String: Any]] = []
+                    while let nl = buffer.firstIndex(of: 0x0a) {
+                        let line = buffer.subdata(in: buffer.startIndex..<nl)
+                        buffer = buffer.subdata(in: (nl + 1)..<buffer.endIndex)
+                        if let e = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] { events.append(e) }
+                    }
+                    if events.isEmpty { continue }
+                    DispatchQueue.main.async { for e in events { self.handle(e) } }
+                    schedule()
                 }
-                let events = lines.compactMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
-                DispatchQueue.main.async {
-                    for e in events { self.handle(e) }
-                    self.schedule()
-                }
+                close(fd)
             }
-            if (try? p.run()) != nil { p.waitUntilExit() }
-            out.fileHandleForReading.readabilityHandler = nil
-            DispatchQueue.main.async { self.schedule() }
-            sleep(2)
+            schedule()
+            usleep(500_000)
         }
     }
+
+    // One fetch at a time, off the main thread; events that arrive during a fetch are
+    // folded into the next one, so a burst of them costs two fetches, not one each.
+    let fetchQueue = DispatchQueue(label: "tatami-bar.fetch", qos: .userInteractive)
 
     func schedule() {
-        if pending { return }
-        pending = true
         DispatchQueue.main.async {
-            self.pending = false
-            self.refresh()
+            if self.pending { return }
+            self.pending = true
+            self.fetchQueue.async {
+                DispatchQueue.main.sync { self.pending = false }
+                let snapshot = self.fetch()
+                DispatchQueue.main.async { self.render(snapshot) }
+            }
         }
     }
 
-    // Draw the new workspace at once from the event itself; refresh() fills in the rest.
+    func refresh() { schedule() }
+
+    // Draw the new workspace at once from the event itself; the fetch fills in the rest.
+    // A focus change is drawn from the windows the last fetch saw, before tatami has
+    // finished moving focus and can answer a query.
     func handle(_ event: [String: Any]) {
-        guard event["type"] as? String == "workspace_changed", let n = event["workspace"] as? Int else { return }
-        show(n)
+        switch event["type"] as? String {
+        case "workspace_changed":
+            if let n = event["workspace"] as? Int { show(n) }
+        case "focus_changed":
+            guard let id = event["window"] as? Int, let w = known[id] else { return }
+            view.title = w.title
+            fullscreenHidden = w.fullscreen
+            apply()
+            view.display()
+        default:
+            break
+        }
     }
 
     func show(_ n: Int) {
@@ -612,8 +663,32 @@ final class Bar: NSObject, NSApplicationDelegate {
         view.display()
     }
 
-    func refresh() {
-        guard let ws = json(["query", "workspaces", "--json"])?["workspaces"] as? [[String: Any]] else {
+    struct Shown { var title: String; var fullscreen: Bool }
+    struct Snapshot { var workspaces: [Workspace]; var title: String; var fullscreen: Bool; var windows: [Int: Shown] }
+    var known: [Int: Shown] = [:]
+
+    func fetch() -> Snapshot? {
+        guard let ws = json("query workspaces --json")?["workspaces"] as? [[String: Any]] else { return nil }
+        let workspaces = ws.map {
+            Workspace(index: $0["index"] as? Int ?? 0, focused: $0["focused"] as? Bool ?? false,
+                      label: $0["label"] as? String ?? "")
+        }.sorted { $0.index < $1.index }
+        var title = ""
+        var fullscreen = false
+        var shown: [Int: Shown] = [:]
+        for w in json("query windows --json")?["windows"] as? [[String: Any]] ?? [] {
+            let app = w["app"] as? String ?? ""
+            let t = w["title"] as? String ?? ""
+            let one = Shown(title: t.isEmpty ? app : (t.contains(app) ? t : "\(app) — \(t)"),
+                            fullscreen: w["fullscreen"] as? Bool ?? false)
+            if let id = w["id"] as? Int { shown[id] = one }
+            if w["focused"] as? Bool ?? false { title = one.title; fullscreen = one.fullscreen }
+        }
+        return Snapshot(workspaces: workspaces, title: title, fullscreen: fullscreen, windows: shown)
+    }
+
+    func render(_ snapshot: Snapshot?) {
+        guard let s = snapshot else {
             view.workspaces = []
             view.title = "tatami is not running"
             fullscreenHidden = false
@@ -621,21 +696,10 @@ final class Bar: NSObject, NSApplicationDelegate {
             view.needsDisplay = true
             return
         }
-        view.workspaces = ws.map {
-            Workspace(index: $0["index"] as? Int ?? 0, focused: $0["focused"] as? Bool ?? false,
-                      label: $0["label"] as? String ?? "")
-        }.sorted { $0.index < $1.index }
-        var title = ""
-        var fullscreen = false
-        if let windows = json(["query", "windows", "--json"])?["windows"] as? [[String: Any]],
-           let w = windows.first(where: { $0["focused"] as? Bool ?? false }) {
-            let app = w["app"] as? String ?? ""
-            let t = w["title"] as? String ?? ""
-            title = t.isEmpty ? app : (t.contains(app) ? t : "\(app) — \(t)")
-            fullscreen = w["fullscreen"] as? Bool ?? false
-        }
-        view.title = title
-        fullscreenHidden = fullscreen
+        known = s.windows
+        view.workspaces = s.workspaces
+        view.title = s.title
+        fullscreenHidden = s.fullscreen
         apply()
         view.display()
     }

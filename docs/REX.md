@@ -60,6 +60,7 @@ line whole is dropped rather than waited for.
 | `window_created <id>` | `{"type":"window_created","window":186}` | A window is taken on. |
 | `window_closed <id>` | `{"type":"window_closed","window":186}` | A window is gone. |
 | `focus_changed <id>` | `{"type":"focus_changed","window":186}` | Focus moved; 0 or `null` when no window has it. |
+| `title_changed <id>` | `{"type":"title_changed","window":186}` | A window's title changed. Ask `query window <id>` for it. |
 | `workspace_changed <n>` | `{"type":"workspace_changed","workspace":2}` | Another workspace is in use. |
 | `view_changed <revision>` | `{"type":"view_changed","revision":57}` | Anything a query can show changed. Ask `query tree` for it. |
 | `mode_changed <name>` | `{"type":"mode_changed","mode":"service"}` | The set of key bindings changed. |
