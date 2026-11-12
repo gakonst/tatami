@@ -159,6 +159,12 @@ pub extern "c" fn CGDisplayRegisterReconfigurationCallback(
     info: ?*anyopaque,
 ) i32;
 pub extern "c" fn CGEventSourceButtonState(state: i32, button: u32) bool;
+pub extern "c" fn CGEventSourceKeyState(state: i32, key: u16) bool;
+pub extern "c" fn CGEventSourceFlagsState(state: i32) u64;
+pub const flag_shift: u64 = 0x20000;
+pub const flag_control: u64 = 0x40000;
+pub const flag_option: u64 = 0x80000;
+pub const flag_cmd: u64 = 0x100000;
 pub extern "c" fn CGEventCreate(source: Ref) Ref;
 pub extern "c" fn CGEventGetLocation(event: Ref) CGPoint;
 pub extern "c" fn CGWarpMouseCursorPosition(point: CGPoint) i32;

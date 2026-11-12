@@ -703,3 +703,20 @@ test "a step says what it changed" {
     os.command_run("query windows");
     try testing.expectEqual(@as(usize, 0), engine.notes_slice().len);
 }
+
+test "windows found at startup are laid out once, in the order they sit on screen" {
+    const os = boot("");
+    const app = os.app_launch("Zed", "dev.zed.Zed");
+    os.adoption(.begin);
+    const right = open(os, app, .{ .frame = Rect.init(1000, 100, 500, 500) });
+    const left = open(os, app, .{ .frame = Rect.init(10, 100, 500, 500) });
+    const middle = open(os, app, .{ .frame = Rect.init(500, 60, 400, 400) });
+    try testing.expectEqual(@as(u64, 0), engine.stats.frames_set);
+    os.adoption(.end);
+    os.settle();
+    try expect_frame(left_half, left);
+    try expect_frame(Rect.init(864, 38, 864, 540), middle);
+    try expect_frame(Rect.init(864, 578, 864, 539), right);
+    // One frame per window, not one layout per window that was found.
+    try testing.expectEqual(@as(u64, 3), engine.stats.frames_set);
+}

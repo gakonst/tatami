@@ -114,8 +114,13 @@ pub const Event = union(enum) {
     /// The answer to a query_focus effect: where keyboard focus is right now.
     focus_reported: WindowId,
     command: Command,
+    /// The shell reports every window that is already open, as at startup, between begin
+    /// and end. Nothing is arranged in between: one layout at the end, not one per window.
+    adoption: Adoption,
     tick,
 };
+
+pub const Adoption = enum { begin, end };
 
 pub const Effect = union(enum) {
     set_frame: struct { id: WindowId, pid: i32, frame: Rect },
@@ -286,6 +291,8 @@ pub const Engine = struct {
     focus_stale: bool,
     /// Set by quit. A stopped engine ignores every event.
     stopped: bool,
+    /// Between adoption begin and end. Frames are not sent meanwhile.
+    adopting: bool,
     now_ms: u64,
     effects: [effects_max]Effect,
     effects_count: u32,
@@ -315,6 +322,7 @@ pub const Engine = struct {
         engine.guard_until_ms = 0;
         engine.focus_stale = false;
         engine.stopped = false;
+        engine.adopting = false;
         engine.now_ms = 0;
         engine.effects_count = 0;
         engine.reply_len = 0;
@@ -364,6 +372,7 @@ pub const Engine = struct {
             .window_focused => |id| engine.focus_observe(id, false),
             .focus_reported => |id| engine.focus_observe(id, true),
             .command => |cmd| engine.on_command(cmd),
+            .adoption => |phase| engine.on_adoption(phase),
             .tick => engine.on_tick(),
         }
         engine.arrange();
@@ -445,7 +454,8 @@ pub const Engine = struct {
         for (&engine.windows) |*window| {
             if (window.id == 0) continue;
             if (window.recheck_at_ms != 0) deadline = min_deadline(deadline, window.recheck_at_ms);
-            if (window.set_pending) {
+            // Frames held back during adoption wait for its end, not for a time.
+            if (window.set_pending and !engine.adopting) {
                 deadline = min_deadline(deadline, engine.apps[window.app].suspended_until_ms);
             }
         }
@@ -1231,7 +1241,9 @@ pub const Engine = struct {
         assert(window.desired_valid);
         assert(window.managed());
         const app = &engine.apps[window.app];
-        if (engine.now_ms < app.suspended_until_ms) {
+        // Held back while the application is not answering, and while the windows that
+        // were already open are still being reported (see on_adoption).
+        if (engine.adopting or engine.now_ms < app.suspended_until_ms) {
             window.set_pending = true;
             return;
         }
@@ -1993,28 +2005,78 @@ pub const Engine = struct {
         _ = engine.forest.resize_edge(leaf, edge.opposite(), -delta, gap);
     }
 
-    /// Rebuilds the workspace tree from scratch, in the current window order.
-    fn command_retile(engine: *Engine) void {
-        const workspace_index = engine.workspace_current();
-        const workspace = &engine.workspaces[workspace_index];
-        const area = engine.workspace_rect(engine.workspace_monitor(workspace_index));
-        var order: [windows_max]WindowId = undefined;
+    /// The tiles of a workspace in tree order.
+    fn tiles_collect(engine: *Engine, workspace_index: u8, order: *[windows_max]WindowId) u32 {
+        const root = engine.workspaces[workspace_index].root;
         var count: u32 = 0;
-        var leaf = engine.forest.leaf_first(workspace.root);
-        while (leaf != node_none) : (leaf = engine.forest.leaf_next(workspace.root, leaf)) {
+        var leaf = engine.forest.leaf_first(root);
+        while (leaf != node_none) : (leaf = engine.forest.leaf_next(root, leaf)) {
             assert(count < windows_max);
             order[count] = engine.forest.nodes[leaf].window;
             count += 1;
         }
+        return count;
+    }
+
+    /// Builds the workspace tree from scratch with the tiles in the order given.
+    fn workspace_rebuild(engine: *Engine, workspace_index: u8, order: []const WindowId) void {
+        const workspace = &engine.workspaces[workspace_index];
+        const area = engine.workspace_rect(engine.workspace_monitor(workspace_index));
         engine.forest.clear(&workspace.root);
         workspace.insert = null;
         workspace.insert_percent = 0;
-        for (order[0..count]) |id| {
+        for (order) |id| {
             engine.window_find(id).?.zoom = .none;
             const anchor = engine.forest.leaf_last(workspace.root);
             engine.forest.insert(&workspace.root, anchor, id, .auto);
             engine.forest.layout(workspace.root, area, engine.gap_inner(workspace_index));
         }
+    }
+
+    /// Rebuilds the workspace tree from scratch, in the current window order.
+    fn command_retile(engine: *Engine) void {
+        const workspace_index = engine.workspace_current();
+        var order: [windows_max]WindowId = undefined;
+        const count = engine.tiles_collect(workspace_index, &order);
+        engine.workspace_rebuild(workspace_index, order[0..count]);
+    }
+
+    fn on_adoption(engine: *Engine, phase: Adoption) void {
+        engine.adopting = phase == .begin;
+        if (engine.adopting or engine.monitors_count == 0) return;
+        // The windows were reported application by application. Tile them the way they
+        // sit on screen instead, so that a restart keeps the arrangement it finds.
+        var workspace: u8 = 0;
+        while (workspace < workspaces_max) : (workspace += 1) {
+            var order: [windows_max]WindowId = undefined;
+            const count = engine.tiles_collect(workspace, &order);
+            if (count < 2) continue;
+            var index: u32 = 1;
+            while (index < count) : (index += 1) {
+                const id = order[index];
+                var at = index;
+                while (at > 0 and engine.reads_before(id, order[at - 1])) : (at -= 1) {
+                    order[at] = order[at - 1];
+                }
+                order[at] = id;
+            }
+            engine.workspace_rebuild(workspace, order[0..count]);
+        }
+        // Now every frame that was held back goes out, once, to where the window ends up.
+        engine.arrange();
+        for (&engine.windows) |*window| {
+            if (window.id == 0 or !window.set_pending) continue;
+            window.set_pending = false;
+            if (window.desired_valid and window.managed()) engine.frame_send(window);
+        }
+    }
+
+    /// Reading order of where two windows are: left to right, then top to bottom.
+    fn reads_before(engine: *Engine, a: WindowId, b: WindowId) bool {
+        const first = engine.window_find(a).?.actual;
+        const second = engine.window_find(b).?.actual;
+        if (first.x != second.x) return first.x < second.x;
+        return first.y < second.y;
     }
 
     fn command_toggle(engine: *Engine, what: command.Toggle) void {

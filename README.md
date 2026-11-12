@@ -99,7 +99,6 @@ workspace, 4 the manager is not running.
 ## What it does not do
 
 - No window borders, opacity, topmost or picture-in-picture: those need SIP disabled.
-- Hot keys do not repeat while held.
 - Workspaces are virtual: hidden windows are parked in a corner, as in AeroSpace. Native
   Spaces are left alone.
 

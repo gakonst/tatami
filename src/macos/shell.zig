@@ -23,6 +23,10 @@ const followups_max: u32 = 2048;
 const app_retries_max: u8 = 6;
 const drag_poll_ms: u64 = 30;
 const monitors_debounce_ms: u64 = 250;
+const repeat_delay_ms: u64 = 300;
+const repeat_interval_ms: u64 = 50;
+/// A key held for longer than this many repeats is taken for stuck.
+const repeats_max: u32 = 400;
 const far_future_seconds: f64 = 3.0e9;
 const config_bytes_max: usize = 64 * 1024;
 
@@ -70,6 +74,9 @@ var quit_requested: bool = false;
 var timer: Ref = null;
 var drag_poll_at_ms: u64 = 0;
 var monitors_dirty_at_ms: u64 = 0;
+var repeat_at_ms: u64 = 0;
+var repeat_binding: u32 = 0;
+var repeat_count: u32 = 0;
 var hot_keys: [config_module.bindings_max]Ref = undefined;
 var hot_keys_count: u32 = 0;
 /// The binding mode whose hot keys are registered. 0 is main.
@@ -611,7 +618,9 @@ fn apps_adopt() void {
         pids_count += 1;
     }
     adopting = true;
+    dispatch(.{ .adoption = .begin });
     for (pids[0..pids_count]) |pid| app_add(pid);
+    dispatch(.{ .adoption = .end });
     adopting = false;
 }
 
@@ -760,13 +769,55 @@ fn hot_key_pressed(call: Ref, event: Ref, context: ?*anyopaque) callconv(.c) i32
     // After the binding's commands, so hot keys are never re-registered under the handler
     // of the one that fired, and "close-others ; mode main" still closes first.
     if (mode_next) |mode| mode_enter(mode);
+    repeat_arm(id.id, &binding);
     return 0;
+}
+
+/// Hot keys fire once per press. A binding that only resizes, nudges or moves focus runs
+/// again for as long as its keys are held, as it would under a key repeat.
+fn repeat_arm(index: u32, binding: *const config_module.Binding) void {
+    repeat_at_ms = 0;
+    for (binding.commands[0..binding.commands_count]) |cmd| {
+        switch (cmd) {
+            .focus, .focus_wrap, .focus_cycle => {},
+            .resize_edge, .resize_dimension, .move_floating => {},
+            else => return,
+        }
+    }
+    repeat_binding = index;
+    repeat_count = 0;
+    repeat_at_ms = c.now_ms() + repeat_delay_ms;
+    timer_rearm();
+}
+
+/// Whether every key of the binding is down right now. Asked of the keyboard, because a
+/// release that is never reported would otherwise repeat for ever.
+fn binding_held(binding: *const config_module.Binding) bool {
+    if (!c.CGEventSourceKeyState(0, binding.keycode)) return false;
+    const flags = c.CGEventSourceFlagsState(0);
+    if (binding.modifiers.cmd and flags & c.flag_cmd == 0) return false;
+    if (binding.modifiers.alt and flags & c.flag_option == 0) return false;
+    if (binding.modifiers.ctrl and flags & c.flag_control == 0) return false;
+    if (binding.modifiers.shift and flags & c.flag_shift == 0) return false;
+    return true;
+}
+
+fn repeat_fire(now_ms: u64) void {
+    repeat_at_ms = 0;
+    if (repeat_binding >= engine.config.bindings_count) return;
+    const binding = engine.config.bindings[repeat_binding];
+    if (binding.mode != mode_current or !binding_held(&binding)) return;
+    repeat_count += 1;
+    if (repeat_count > repeats_max) return;
+    for (binding.commands[0..binding.commands_count]) |cmd| dispatch(.{ .command = cmd });
+    repeat_at_ms = now_ms + repeat_interval_ms;
 }
 
 fn mode_enter(mode: u8) void {
     assert(mode < engine.config.modes_count);
     if (mode == mode_current) return;
     mode_current = mode;
+    repeat_at_ms = 0;
     hot_keys_register();
     event_publish("mode_changed", engine.config.mode_name(mode));
 }
@@ -803,6 +854,7 @@ fn timer_fired(fired: Ref, info: ?*anyopaque) callconv(.c) void {
         monitors_dirty_at_ms = 0;
         monitors_refresh();
     }
+    if (repeat_at_ms != 0 and repeat_at_ms <= now) repeat_fire(now);
     if (engine.next_deadline_ms()) |deadline| {
         if (deadline <= c.now_ms()) dispatch(.tick);
     }
@@ -813,7 +865,7 @@ fn timer_rearm() void {
     if (timer == null) return;
     var next: ?u64 = engine.next_deadline_ms();
     if (quit_requested) next = 1;
-    const extras = [_]u64{ drag_poll_at_ms, monitors_dirty_at_ms };
+    const extras = [_]u64{ drag_poll_at_ms, monitors_dirty_at_ms, repeat_at_ms };
     for (extras) |at| {
         if (at != 0 and (next == null or at < next.?)) next = at;
     }
@@ -879,6 +931,7 @@ fn config_load(reload: bool) void {
     }
     if (reload) {
         mode_current = 0;
+        repeat_at_ms = 0;
         hot_keys_register();
         event_publish("config_reloaded", null);
     }

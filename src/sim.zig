@@ -788,6 +788,10 @@ pub const Simulator = struct {
         simulator.step(.{ .monitors_changed = simulator.monitors });
     }
 
+    pub fn adoption(simulator: *Simulator, phase: engine_module.Adoption) void {
+        simulator.step(.{ .adoption = phase });
+    }
+
     pub fn command_run(simulator: *Simulator, text: []const u8) void {
         var pool: command.StringPool = .{};
         const parsed = command.parse(text, &pool) catch unreachable;
@@ -809,7 +813,17 @@ pub const Simulator = struct {
         const id: WindowId = if (window) |w| w.id else 0;
         switch (roll) {
             0...39 => simulator.command_run(commands[prng.below(commands.len)]),
-            40...51 => simulator.action_open(),
+            40...51 => {
+                // Now and then several windows are reported in one go, as at startup.
+                const batch = prng.chance(1, 8);
+                if (batch) simulator.step(.{ .adoption = .begin });
+                simulator.action_open();
+                if (batch) {
+                    simulator.action_open();
+                    simulator.advance(2);
+                    simulator.step(.{ .adoption = .end });
+                }
+            },
             52...57 => simulator.window_close(id),
             58...60 => {
                 const template = app_templates[prng.below(app_templates.len)];
