@@ -181,6 +181,33 @@ pub extern "c" fn CGDisplayRegisterReconfigurationCallback(
     info: ?*anyopaque,
 ) i32;
 pub extern "c" fn CGEventSourceButtonState(state: i32, button: u32) bool;
+pub const CGEventTapCallBack = *const fn (
+    proxy: Ref,
+    event_type: u32,
+    event: Ref,
+    info: ?*anyopaque,
+) callconv(.c) Ref;
+pub const event_tap_session: u32 = 1;
+pub const event_tap_head_insert: u32 = 0;
+pub const event_tap_listen_only: u32 = 1;
+pub const event_left_mouse_down: u32 = 1;
+pub const event_left_mouse_up: u32 = 2;
+pub const event_right_mouse_down: u32 = 3;
+pub const event_right_mouse_up: u32 = 4;
+pub const event_other_mouse_down: u32 = 25;
+pub const event_other_mouse_up: u32 = 26;
+pub const event_tap_disabled_by_timeout: u32 = 0xFFFFFFFE;
+pub const event_tap_disabled_by_user_input: u32 = 0xFFFFFFFF;
+pub extern "c" fn CGEventTapCreate(
+    tap: u32,
+    place: u32,
+    options: u32,
+    events_of_interest: u64,
+    callback: CGEventTapCallBack,
+    info: ?*anyopaque,
+) Ref;
+pub extern "c" fn CGEventTapEnable(tap: Ref, enable: bool) void;
+pub extern "c" fn CFMachPortCreateRunLoopSource(allocator: Ref, port: Ref, order: CFIndex) Ref;
 pub extern "c" fn CGEventSourceKeyState(state: i32, key: u16) bool;
 pub extern "c" fn CGEventSourceFlagsState(state: i32) u64;
 pub const flag_shift: u64 = 0x20000;
