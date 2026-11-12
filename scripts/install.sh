@@ -35,6 +35,14 @@ else
 fi
 mv -f "$bin.new" "$bin"
 
+# A plist that already starts this binary is left as it is: something else, such as a
+# Nix configuration, may own it, and would only put its own back.
+if [ -f "$plist" ] && grep -q "<string>$bin</string>" "$plist"; then
+    launchctl bootstrap "$domain" "$plist"
+    echo "installed $bin, reloaded $label from the plist that was there; log: $log"
+    exit 0
+fi
+
 cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

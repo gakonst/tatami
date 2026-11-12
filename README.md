@@ -102,3 +102,8 @@ workspace, 4 the manager is not running.
 - Hot keys do not repeat while held.
 - Workspaces are virtual: hidden windows are parked in a corner, as in AeroSpace. Native
   Spaces are left alone.
+
+## Licence
+
+MIT or Apache-2.0, at your option: [LICENSE-MIT](LICENSE-MIT),
+[LICENSE-APACHE](LICENSE-APACHE).
