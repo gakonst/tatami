@@ -25,6 +25,9 @@ const followups_max: u32 = 2048;
 const app_retries_max: u8 = 6;
 const drag_poll_ms: u64 = 30;
 const monitors_debounce_ms: u64 = 250;
+/// Applications answer for their windows again one by one after the unlock: one was seen
+/// still invalid when the unlock was announced and answering 240 ms later.
+const unlock_settle_ms: u64 = 1000;
 const repeat_delay_ms: u64 = 300;
 const repeat_interval_ms: u64 = 50;
 /// A key held for longer than this many repeats is taken for stuck.
@@ -391,7 +394,7 @@ fn perform_set_frame(id: u32, pid: i32, frame: Rect) void {
                 if (app_find(pid)) |app| app.hung_batch = batch;
                 followup_push(.{ .app_unresponsive = pid });
             },
-            error.Invalid => {
+            error.Invalid => if (!ax.screen_locked()) {
                 window_forget(id);
                 followup_push(.{ .window_destroyed = id });
             },
@@ -439,6 +442,7 @@ fn perform_focus(id: u32, pid: i32) void {
             return followup_push(.{ .app_unresponsive = pid });
         },
         error.Invalid => {
+            if (ax.screen_locked()) return;
             // Gone: said now, not found out when the focus is never confirmed.
             window_forget(id);
             return followup_push(.{ .window_destroyed = id });
@@ -527,7 +531,7 @@ fn focus_left_check(id: u32) void {
     const next = engine.window_find(id) orelse return;
     if (engine.workspace_visible(next.workspace)) return;
     const window = window_find(previous) orelse return;
-    if (!ax.alive(window.element)) {
+    if (!ax.alive(window.element) and !ax.screen_locked()) {
         window_forget(previous);
         return dispatch(.{ .window_destroyed = previous });
     }
@@ -691,7 +695,10 @@ fn pointer_at(window: *const ShellWindow) bool {
 }
 
 /// Reads every window's frame again, after a time in which changes were not listened to.
+/// Not while the screen is locked, when every element reads as invalid: the unlock
+/// forces another pass.
 fn frames_resync() void {
+    if (ax.screen_locked()) return;
     var hung_pid: i32 = 0;
     for (&windows) |*window| {
         if (window.id == 0) continue;
@@ -708,7 +715,7 @@ fn frames_resync() void {
 fn frame_report(window: *ShellWindow, by_user: bool) void {
     const id = window.id;
     const frame = ax.frame_get(window.element) catch |err| {
-        if (err == error.Invalid) {
+        if (err == error.Invalid and !ax.screen_locked()) {
             window_forget(id);
             dispatch(.{ .window_destroyed = id });
         }
@@ -907,6 +914,7 @@ fn app_front(pid: i32) void {
         // One timeout for an application that hangs, not one for each of its windows.
         if (ax.timeouts != timeouts) break;
         if (window.id == 0 or window.pid != pid or ax.alive(window.element)) continue;
+        if (ax.screen_locked()) break;
         const id = window.id;
         window_forget(id);
         dispatch(.{ .window_destroyed = id });
@@ -1109,7 +1117,7 @@ fn system_changed(
     if (@intFromPtr(observer) == observer_unlocked) {
         // macOS may have moved windows while the screen was locked; go over all of them.
         monitors_force = true;
-        monitors_dirty_at_ms = now + monitors_debounce_ms;
+        monitors_dirty_at_ms = now + unlock_settle_ms;
         secure_input_check();
     } else {
         monitors_recheck_at_ms = now + monitors_debounce_ms;

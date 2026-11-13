@@ -61,6 +61,21 @@ fn name(text: [*:0]const u8) Ref {
     return string;
 }
 
+/// Whether the login session's screen is locked. While it is, Accessibility answers
+/// kAXErrorInvalidUIElement for every window of every application, though the window
+/// server still has them all and the same elements answer again after the unlock (seen
+/// live on macOS 27.2). An invalid element then says nothing about a window being gone.
+pub fn screen_locked() bool {
+    const session = c.CGSessionCopyCurrentDictionary();
+    if (session == null) return false;
+    defer c.CFRelease(session);
+    const key = name("CGSSessionScreenIsLocked");
+    defer c.CFRelease(key);
+    const value = c.CFDictionaryGetValue(session, key);
+    if (value == null or c.CFGetTypeID(value) != c.CFBooleanGetTypeID()) return false;
+    return c.CFBooleanGetValue(value) != 0;
+}
+
 /// The process that holds Secure Input, 0 when nobody does, -1 when it cannot be told.
 /// While it is held, macOS delivers no hot key that is a character key with only option
 /// and shift: the key types its character instead.
