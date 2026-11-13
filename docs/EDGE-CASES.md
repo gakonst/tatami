@@ -45,15 +45,15 @@ faults on and checks its invariants after every quiet moment ([DESIGN.md](DESIGN
 
 | Tracker | Cases | Tested | Fixed | Fixed in the shell | No test | Open | Needs a real Mac | Does not apply |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| AeroSpace | 86 | 43 | 11 | 5 | 6 | 3 | 15 | 3 |
+| AeroSpace | 86 | 43 | 11 | 6 | 6 | 3 | 14 | 3 |
 | yabai and skhd | 95 | 51 | 13 | 13 | 2 | 2 | 10 | 4 |
 | i3 and sway | 89 | 48 | 15 | 3 | 4 | 3 | 7 | 9 |
 | Amethyst, Rectangle, Hammerspoon and komorebi | 93 | 58 | 8 | 8 | 4 | 1 | 10 | 4 |
-| **Sum** | **363** | **200** | **47** | **29** | **16** | **9** | **42** | **20** |
+| **Sum** | **363** | **200** | **47** | **30** | **16** | **9** | **41** | **20** |
 
 The trackers gave 363 rows. Rows from different trackers that describe the same case are merged
-below, which leaves 217 cases: 105 tested, 28 fixed, 16 fixed in the shell, 16 with no test, 8 open,
-30 that need a real Mac and 14 that do not apply. In the table a row counts under the status of its
+below, which leaves 217 cases: 105 tested, 28 fixed, 17 fixed in the shell, 16 with no test, 8 open,
+29 that need a real Mac and 14 that do not apply. In the table a row counts under the status of its
 case.
 
 ## What was wrong and is fixed
@@ -105,6 +105,7 @@ of the code until it is seen on a Mac.
 | Frames reported while the displays are being reconfigured are dropped, and all frames are read once afterwards. Before, the moves macOS makes at sleep, wake and replug were corrected one by one and could float a tile. | [yabai #259](https://github.com/asmvik/yabai/issues/259), [yabai #884](https://github.com/asmvik/yabai/issues/884), [yabai #1106](https://github.com/asmvik/yabai/issues/1106), [i3 #2092](https://github.com/i3/i3/issues/2092), [i3 #4401](https://github.com/i3/i3/issues/4401), [sway #2714](https://github.com/swaywm/sway/issues/2714), [sway #6642](https://github.com/swaywm/sway/issues/6642) |
 | Displays are identified by their UUID rather than by the CGDirectDisplayID, which changes across docks, KVMs and GPU switches, so workspaces find their display again. Mirrored displays are left out. | [yabai #346](https://github.com/asmvik/yabai/issues/346), [yabai #602](https://github.com/asmvik/yabai/issues/602), [yabai #1785](https://github.com/asmvik/yabai/issues/1785), [i3 #2883](https://github.com/i3/i3/issues/2883), [i3 #4278](https://github.com/i3/i3/issues/4278), [sway #669](https://github.com/swaywm/sway/issues/669), [sway #847](https://github.com/swaywm/sway/issues/847), [sway #3137](https://github.com/swaywm/sway/issues/3137), [sway #8644](https://github.com/swaywm/sway/issues/8644), [komorebi #31](https://github.com/LGUG2Z/komorebi/issues/31), [komorebi #275](https://github.com/LGUG2Z/komorebi/issues/275), [komorebi #913](https://github.com/LGUG2Z/komorebi/issues/913) |
 | The usable area is read again when the Dock or the menu bar changes, and once more a moment later, since AppKit learns it late. When the screen is unlocked the displays are read again and every window is put back where it belongs. Before, the area was read only when the displays were reconfigured. | [AeroSpace #74](https://github.com/nikitabobko/AeroSpace/issues/74), [AeroSpace discussion #1074](https://github.com/nikitabobko/AeroSpace/discussions/1074), [yabai #403](https://github.com/asmvik/yabai/issues/403), [yabai #793](https://github.com/asmvik/yabai/issues/793), [yabai #1761](https://github.com/asmvik/yabai/issues/1761), [yabai #1951](https://github.com/asmvik/yabai/issues/1951), [Amethyst #141](https://github.com/ianyh/Amethyst/issues/141), [Amethyst #729](https://github.com/ianyh/Amethyst/issues/729), [Amethyst #1167](https://github.com/ianyh/Amethyst/issues/1167), [Amethyst #1168](https://github.com/ianyh/Amethyst/issues/1168), [Amethyst #1282](https://github.com/ianyh/Amethyst/issues/1282), [Rectangle #467](https://github.com/rxhanson/Rectangle/issues/467), [Rectangle #695](https://github.com/rxhanson/Rectangle/issues/695), [Rectangle #1234](https://github.com/rxhanson/Rectangle/issues/1234), [Rectangle #1674](https://github.com/rxhanson/Rectangle/issues/1674), [Rectangle #1922](https://github.com/rxhanson/Rectangle/issues/1922), [Hammerspoon #520](https://github.com/Hammerspoon/hammerspoon/issues/520), [Hammerspoon #3643](https://github.com/Hammerspoon/hammerspoon/issues/3643) |
+| While the screen is locked, a window that Accessibility reports as gone is kept, and the frames are read again only after the unlock, a second later. Before, waking the display to the password prompt was a display change, and the frames read after it found every window gone: all of them were let go, and the windows of hidden workspaces stayed parked. Seen live on macOS 27.2: while the screen is locked every window element answers invalid, the window server still lists every window, and the same elements answer again after the unlock. [scripts/lock-check.sh](../scripts/lock-check.sh) repeats the check by hand. | [AeroSpace #771](https://github.com/nikitabobko/AeroSpace/issues/771), [AeroSpace #802](https://github.com/nikitabobko/AeroSpace/issues/802), [AeroSpace #814](https://github.com/nikitabobko/AeroSpace/issues/814), [AeroSpace #2234](https://github.com/nikitabobko/AeroSpace/issues/2234), [AeroSpace discussion #1599](https://github.com/nikitabobko/AeroSpace/discussions/1599) |
 | A second tatami refuses to start while one is running. Before, it took the socket while the first kept moving windows. | [AeroSpace #40](https://github.com/nikitabobko/AeroSpace/issues/40), [AeroSpace #141](https://github.com/nikitabobko/AeroSpace/issues/141), [yabai #1228](https://github.com/asmvik/yabai/issues/1228), [yabai #2086](https://github.com/asmvik/yabai/issues/2086), [yabai #2808](https://github.com/asmvik/yabai/issues/2808), [skhd #74](https://github.com/asmvik/skhd/issues/74) |
 | The command socket is opened before the windows found at start are taken on. Before, the command line answered "not running" for as long as slow applications took. | [yabai #2772](https://github.com/asmvik/yabai/issues/2772) |
 | What the manager knows is kept in a small file, `/tmp/tatami-<uid>.state`: the display of every workspace, which workspaces show, and for every window its workspace, its place in the layout, its mode and its label ([src/state.zig](../src/state.zig), which has tests of its own). It is written when it changes and at quit, and read at the next start. Before, a restart put every window on the workspace its display showed. | [AeroSpace #152](https://github.com/nikitabobko/AeroSpace/issues/152), [AeroSpace #356](https://github.com/nikitabobko/AeroSpace/issues/356), [AeroSpace discussion #2007](https://github.com/nikitabobko/AeroSpace/discussions/2007) |
@@ -185,13 +186,7 @@ or needs a change there; everything else is work in the shell that is not done.
    [yabai #2431](https://github.com/asmvik/yabai/issues/2431),
    [Amethyst #830](https://github.com/ianyh/Amethyst/issues/830),
    [Hammerspoon #3295](https://github.com/Hammerspoon/hammerspoon/issues/3295).
-5. **Lock screen and sleep.** The shell learns that the displays sleep only from an empty display
-   list; it listens for the unlock, not for sleep or wake. While the screen is locked a window that
-   Accessibility reports as gone still counts as closed.
-   [AeroSpace #771](https://github.com/nikitabobko/AeroSpace/issues/771),
-   [AeroSpace #814](https://github.com/nikitabobko/AeroSpace/issues/814),
-   [AeroSpace #2234](https://github.com/nikitabobko/AeroSpace/issues/2234).
-6. **Native Spaces, Mission Control, Stage Manager.** The shell does not follow the active Space. A
+5. **Native Spaces, Mission Control, Stage Manager.** The shell does not follow the active Space. A
    window on another Space is found only when it takes focus, a window dragged to another Space
    keeps its tile, and tiles sit under the Stage Manager strip.
    [AeroSpace #91](https://github.com/nikitabobko/AeroSpace/issues/91),
@@ -200,7 +195,7 @@ or needs a change there; everything else is work in the shell that is not done.
    [yabai #1580](https://github.com/asmvik/yabai/issues/1580),
    [Amethyst #11](https://github.com/ianyh/Amethyst/issues/11),
    [Amethyst #1258](https://github.com/ianyh/Amethyst/issues/1258).
-7. **Tab detection.** Tabs are recognised by equal frames when a window appears. A window of another
+6. **Tab detection.** Tabs are recognised by equal frames when a window appears. A window of another
    Space can be taken for a tab, tabs already merged at start are not recognised, and a tab being
    torn off is tiled under the pointer.
    [AeroSpace #68](https://github.com/nikitabobko/AeroSpace/issues/68),
@@ -208,44 +203,44 @@ or needs a change there; everything else is work in the shell that is not done.
    [AeroSpace discussion #2214](https://github.com/nikitabobko/AeroSpace/discussions/2214),
    [yabai #233](https://github.com/asmvik/yabai/issues/233),
    [Amethyst #1613](https://github.com/ianyh/Amethyst/issues/1613).
-8. **Windows without a title bar.** Terminals with decorations off, Wine and windows with an unknown
+7. **Windows without a title bar.** Terminals with decorations off, Wine and windows with an unknown
    subrole are dropped as popups before any rule sees them, so no rule can tile them.
    [AeroSpace #166](https://github.com/nikitabobko/AeroSpace/issues/166),
    [AeroSpace #208](https://github.com/nikitabobko/AeroSpace/issues/208),
    [Amethyst #200](https://github.com/ianyh/Amethyst/issues/200),
    [Amethyst #300](https://github.com/ianyh/Amethyst/issues/300).
-9. **A display between two taller ones (engine).** Its hidden windows show on a neighbour: no bottom
+8. **A display between two taller ones (engine).** Its hidden windows show on a neighbour: no bottom
    corner and no side is free.
    [AeroSpace discussion #2102](https://github.com/nikitabobko/AeroSpace/discussions/2102),
    [Amethyst #1436](https://github.com/ianyh/Amethyst/issues/1436),
    [komorebi #1053](https://github.com/LGUG2Z/komorebi/issues/1053),
    [komorebi #1056](https://github.com/LGUG2Z/komorebi/issues/1056).
-10. **Keyboard layouts.** Bindings are ANSI key positions, not the letters of the layout in use, and
-    the default option-number bindings take characters away on German, Nordic and similar layouts.
-    [skhd #59](https://github.com/asmvik/skhd/issues/59),
-    [skhd #69](https://github.com/asmvik/skhd/issues/69),
-    [skhd #281](https://github.com/asmvik/skhd/issues/281),
-    [skhd #358](https://github.com/asmvik/skhd/issues/358).
-11. **Startup with a hung application.** Finding a window makes eight Accessibility calls without
+9. **Keyboard layouts.** Bindings are ANSI key positions, not the letters of the layout in use, and
+   the default option-number bindings take characters away on German, Nordic and similar layouts.
+   [skhd #59](https://github.com/asmvik/skhd/issues/59),
+   [skhd #69](https://github.com/asmvik/skhd/issues/69),
+   [skhd #281](https://github.com/asmvik/skhd/issues/281),
+   [skhd #358](https://github.com/asmvik/skhd/issues/358).
+10. **Startup with a hung application.** Finding a window makes eight Accessibility calls without
     stopping at the first timeout, so a hung application with N windows holds the start for about N
     times 2 s. [Amethyst #1757](https://github.com/ianyh/Amethyst/issues/1757),
     [Hammerspoon #2596](https://github.com/Hammerspoon/hammerspoon/issues/2596),
     [Hammerspoon #3421](https://github.com/Hammerspoon/hammerspoon/issues/3421).
-12. **A stale drag report (engine).** A mouse-drag report that arrives after `tile` or
+11. **A stale drag report (engine).** A mouse-drag report that arrives after `tile` or
     `toggle float` is read as a resize of the new tile. The shell could drop the report of a drag
     for a window that was sent a frame after the drag began.
     [i3 #1098](https://github.com/i3/i3/issues/1098),
     [i3 #1627](https://github.com/i3/i3/issues/1627).
-13. **Dialogs and popups of the focused application.** The shell does not say which window a dialog
+12. **Dialogs and popups of the focused application.** The shell does not say which window a dialog
     belongs to, so a dialog joins the workspace in use rather than its parent's, and focusing a tile
     can raise it over its own dialog. A focus request to an application that shows a menu or popup
     can close it (Java, JetBrains). [i3 #4242](https://github.com/i3/i3/issues/4242),
     [sway #3007](https://github.com/swaywm/sway/issues/3007),
     [sway #4797](https://github.com/swaywm/sway/issues/4797).
-14. **`swap` is not undone (engine).** `swap west` and then `swap east` moves a third window when
+13. **`swap` is not undone (engine).** `swap west` and then `swap east` moves a third window when
     two windows tie on that side: the tie goes to the one focused most recently.
     [yabai #1545](https://github.com/asmvik/yabai/issues/1545).
-15. **Labels (engine).** A label on a window whose native tab is the one showing answers conflict to
+14. **Labels (engine).** A label on a window whose native tab is the one showing answers conflict to
     `focus`, `zoom` and `move`. Two workspaces with one label resolve to the lower number without a
     word. [i3 #2014](https://github.com/i3/i3/issues/2014),
     [i3 #5045](https://github.com/i3/i3/issues/5045),
@@ -413,7 +408,7 @@ One line per case, by theme. Tests are named as they are written in the source.
 | Commands and events while there is no display crash; here a command then does nothing and answers without an error | [AeroSpace #164](https://github.com/nikitabobko/AeroSpace/issues/164), [AeroSpace #890](https://github.com/nikitabobko/AeroSpace/issues/890), [sway #8882](https://github.com/swaywm/sway/issues/8882) | tested | "commands while every display sleeps do nothing, and queries still answer" |
 | macOS piles windows up, or pulls hidden ones back on screen, while the displays sleep or change | [yabai #259](https://github.com/asmvik/yabai/issues/259), [yabai #884](https://github.com/asmvik/yabai/issues/884), [yabai #2746](https://github.com/asmvik/yabai/issues/2746), [Amethyst #1030](https://github.com/ianyh/Amethyst/issues/1030), [Rectangle #777](https://github.com/rxhanson/Rectangle/issues/777), [komorebi #1087](https://github.com/LGUG2Z/komorebi/issues/1087) | tested | "windows that macOS shuffles while the displays sleep are put back", "a hidden window that is moved back on screen is hidden again" |
 | What macOS itself does to windows when the displays wake | [AeroSpace #811](https://github.com/nikitabobko/AeroSpace/issues/811), [AeroSpace #873](https://github.com/nikitabobko/AeroSpace/issues/873), [AeroSpace discussion #1182](https://github.com/nikitabobko/AeroSpace/discussions/1182) | needs a real Mac |  |
-| While the screen is locked Accessibility reports windows as gone | [AeroSpace #771](https://github.com/nikitabobko/AeroSpace/issues/771), [AeroSpace #802](https://github.com/nikitabobko/AeroSpace/issues/802), [AeroSpace #814](https://github.com/nikitabobko/AeroSpace/issues/814), [AeroSpace #2234](https://github.com/nikitabobko/AeroSpace/issues/2234), [AeroSpace discussion #1599](https://github.com/nikitabobko/AeroSpace/discussions/1599) | needs a real Mac |  |
+| While the screen is locked Accessibility reports windows as gone | [AeroSpace #771](https://github.com/nikitabobko/AeroSpace/issues/771), [AeroSpace #802](https://github.com/nikitabobko/AeroSpace/issues/802), [AeroSpace #814](https://github.com/nikitabobko/AeroSpace/issues/814), [AeroSpace #2234](https://github.com/nikitabobko/AeroSpace/issues/2234), [AeroSpace discussion #1599](https://github.com/nikitabobko/AeroSpace/discussions/1599) | fixed in the shell, not run under test |  |
 | Workspace labels are lost after sleep | [yabai #1953](https://github.com/asmvik/yabai/issues/1953), [yabai #2229](https://github.com/asmvik/yabai/issues/2229) | no test |  |
 | Unplugging a display loses its workspaces, makes them unreachable or crashes; they do not return when it is plugged back in | [AeroSpace #404](https://github.com/nikitabobko/AeroSpace/issues/404), [AeroSpace #506](https://github.com/nikitabobko/AeroSpace/issues/506), [AeroSpace #651](https://github.com/nikitabobko/AeroSpace/issues/651), [AeroSpace #675](https://github.com/nikitabobko/AeroSpace/issues/675), [AeroSpace #1079](https://github.com/nikitabobko/AeroSpace/issues/1079), [AeroSpace #1613](https://github.com/nikitabobko/AeroSpace/issues/1613), [AeroSpace discussion #2197](https://github.com/nikitabobko/AeroSpace/discussions/2197), [AeroSpace discussion #2262](https://github.com/nikitabobko/AeroSpace/discussions/2262), [i3 #2098](https://github.com/i3/i3/issues/2098), [i3 #2326](https://github.com/i3/i3/issues/2326), [i3 #2883](https://github.com/i3/i3/issues/2883), [sway #2714](https://github.com/swaywm/sway/issues/2714), [sway #3136](https://github.com/swaywm/sway/issues/3136), [Amethyst #230](https://github.com/ianyh/Amethyst/issues/230), [Amethyst #913](https://github.com/ianyh/Amethyst/issues/913), [komorebi #267](https://github.com/LGUG2Z/komorebi/issues/267), [komorebi #1640](https://github.com/LGUG2Z/komorebi/issues/1640) | tested | "displays coming and going in any order lose no window and no workspace", "workspaces return to a monitor that is unplugged and plugged back in", "a monitor that returns shows the workspace it showed and still has its others" |
 | A display that comes back shows another workspace than the one it showed when it left | [AeroSpace #2173](https://github.com/nikitabobko/AeroSpace/issues/2173), [yabai #259](https://github.com/asmvik/yabai/issues/259), [yabai #1237](https://github.com/asmvik/yabai/issues/1237), [yabai #1785](https://github.com/asmvik/yabai/issues/1785), [i3 #4278](https://github.com/i3/i3/issues/4278), [sway #669](https://github.com/swaywm/sway/issues/669) | fixed | "a display that is plugged back in shows the workspace it showed before", "a display that is unplugged and comes back shows the workspace it showed", "a monitor that returns shows the workspace it showed and still has its others" |
