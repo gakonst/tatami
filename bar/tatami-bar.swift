@@ -13,6 +13,7 @@
 import Cocoa
 import IOKit.ps
 import CoreAudio
+import AudioToolbox
 
 func log(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
 
@@ -503,10 +504,46 @@ final class Sound: TrayPlugin {
         if status != noErr { log("sound: could not switch output to device \(id): OSStatus \(status)") }
     }
 
+    // The output's own volume, 0 to 1; nil when it has none macOS can set (an audio
+    // interface with a hardware knob, a multi-output device).
+    func volume(_ id: AudioDeviceID) -> Float? {
+        var a = address(kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioObjectPropertyScopeOutput)
+        var settable: DarwinBoolean = false
+        guard AudioObjectHasProperty(id, &a), AudioObjectIsPropertySettable(id, &a, &settable) == noErr,
+              settable.boolValue else { return nil }
+        var v: Float32 = 0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        guard AudioObjectGetPropertyData(id, &a, 0, nil, &size, &v) == noErr else { return nil }
+        return v
+    }
+
+    func setVolume(_ id: AudioDeviceID, _ v: Float) {
+        var a = address(kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioObjectPropertyScopeOutput)
+        var x = Float32(v)
+        _ = AudioObjectSetPropertyData(id, &a, 0, nil, UInt32(MemoryLayout<Float32>.size), &x)
+        // Raising the volume unmutes, as the volume keys do.
+        var m = address(kAudioDevicePropertyMute, kAudioObjectPropertyScopeOutput)
+        var muted: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        if v > 0, AudioObjectGetPropertyData(id, &m, 0, nil, &size, &muted) == noErr, muted != 0 {
+            var off: UInt32 = 0
+            _ = AudioObjectSetPropertyData(id, &m, 0, nil, size, &off)
+        }
+    }
+
     func menu(in view: NSView, at rect: NSRect, refresh: @escaping () -> Void) {
         let now = current()
         let menu = NSMenu()
         menu.autoenablesItems = false
+        let slider = NSMenuItem()
+        if let v = volume(now) {
+            slider.view = VolumeSlider(value: v) { self.setVolume(now, $0) }
+        } else {
+            slider.title = "Volume is set on the device"
+            slider.isEnabled = false
+        }
+        menu.addItem(slider)
+        menu.addItem(.separator())
         let head = NSMenuItem(title: "Output", action: nil, keyEquivalent: "")
         head.isEnabled = false
         menu.addItem(head)
@@ -528,6 +565,40 @@ final class Sound: TrayPlugin {
             _ = AudioObjectAddPropertyListenerBlock(system, &a, .main) { _, _ in changed() }
         }
     }
+}
+
+// A small volume slider for a menu, between a quiet and a loud speaker. On macOS 26 the menu
+// and the slider take the system's Liquid Glass look.
+final class VolumeSlider: NSView {
+    let slider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let onChange: (Float) -> Void
+
+    init(value: Float, onChange: @escaping (Float) -> Void) {
+        self.onChange = onChange
+        super.init(frame: NSRect(x: 0, y: 0, width: 220, height: 28))
+        autoresizingMask = [.width]
+        func speaker(_ name: String, _ x: CGFloat, _ mask: NSView.AutoresizingMask) {
+            let v = NSImageView(frame: NSRect(x: x, y: 6, width: 16, height: 16))
+            v.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .medium))
+            v.contentTintColor = .secondaryLabelColor
+            v.autoresizingMask = mask
+            addSubview(v)
+        }
+        speaker("speaker.fill", 14, [.maxXMargin])
+        speaker("speaker.wave.3.fill", 220 - 14 - 16, [.minXMargin])
+        slider.frame = NSRect(x: 36, y: 4, width: 220 - 72, height: 20)
+        slider.autoresizingMask = [.width]
+        slider.controlSize = .small
+        slider.isContinuous = true
+        slider.floatValue = value
+        slider.target = self
+        slider.action = #selector(changed)
+        addSubview(slider)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc func changed() { onChange(slider.floatValue) }
 }
 
 // MARK: The bar

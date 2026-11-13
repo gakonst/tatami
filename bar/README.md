@@ -55,8 +55,9 @@ admin console. Its dot is green when connected, and the exit node in use is show
 it.
 
 `tray sound` shows a speaker; a click lists the sound output devices, as Sound settings
-does, with a tick on the one in use. Pick one to play through it. It follows changes made
-elsewhere, such as plugging in headphones.
+does, with a tick on the one in use, under a small volume slider. Pick one to play
+through it. It follows changes made elsewhere, such as plugging in headphones. An output
+whose volume macOS cannot set (an audio interface with a hardware knob) shows no slider.
 
 ### Plugins
 
