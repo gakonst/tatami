@@ -57,7 +57,7 @@ exactly where the engine says it should be. See [docs/DESIGN.md](docs/DESIGN.md)
 ./scripts/sim-find.sh 1 3000 5000       # seeds 1..3000, 5000 steps each
 ```
 
-Apple Silicon macOS only.
+Apple Silicon and Intel macOS.
 
 ## Install
 

@@ -3,6 +3,7 @@
 //! a little libc. No headers and no cImport; every declaration here was checked against
 //! the SDK by hand, and there are few enough to keep it that way.
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Any CoreFoundation, Accessibility, Carbon or Objective-C object reference.
 pub const Ref = ?*anyopaque;
@@ -254,6 +255,7 @@ pub extern "c" fn GetProcessPID(psn: *const ProcessSerialNumber, pid: *i32) i32;
 pub extern "c" fn objc_getClass(name: [*:0]const u8) Ref;
 pub extern "c" fn sel_registerName(name: [*:0]const u8) Ref;
 pub extern "c" fn objc_msgSend() void;
+pub extern "c" fn objc_msgSend_stret() void;
 pub extern "c" fn objc_autoreleasePoolPush() Ref;
 pub extern "c" fn objc_autoreleasePoolPop(pool: Ref) void;
 pub extern "c" fn NSApplicationLoad() Boolean;
@@ -281,6 +283,14 @@ pub fn send_integer(object: Ref, selector: [*:0]const u8) isize {
 
 pub fn send_rect(object: Ref, selector: [*:0]const u8) CGRect {
     // On arm64 a CGRect comes back in d0-d3 through plain objc_msgSend.
+    if (comptime builtin.cpu.arch == .x86_64) {
+        // On x86_64 it comes back through objc_msgSend_stret, buffer first.
+        var rect: CGRect = undefined;
+        const function: *const fn (*CGRect, Ref, Ref) callconv(.c) void =
+            @ptrCast(&objc_msgSend_stret);
+        function(&rect, object, sel_registerName(selector));
+        return rect;
+    }
     const function: *const fn (Ref, Ref) callconv(.c) CGRect = @ptrCast(&objc_msgSend);
     return function(object, sel_registerName(selector));
 }
