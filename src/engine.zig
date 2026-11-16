@@ -58,6 +58,10 @@ pub const focus_pending_ms: u64 = 500;
 pub const fullscreen_exit_ms: u64 = 1500;
 /// The most a parked window may be lifted; beyond this something else is going on.
 pub const park_lift_max: i32 = 256;
+/// How much of a floating window has to show on a display, across and down, for it to
+/// count as in view there. A parked window leaves one pixel on its display, and a window
+/// that macOS reopens where it was parked must not pass for one that can be seen.
+pub const float_reach_min: i32 = 40;
 pub const backoff_min_ms: u32 = 250;
 pub const backoff_max_ms: u32 = 8000;
 /// The furthest one command moves a floating window: more than any desk of displays is
@@ -1550,9 +1554,17 @@ pub const Engine = struct {
 
     fn on_some_monitor(engine: *const Engine, rect: Rect) bool {
         for (engine.monitors[0..engine.monitors_count]) |*monitor| {
-            if (rect.intersects(monitor.frame)) return true;
+            if (reachable(rect, monitor.frame)) return true;
         }
         return false;
+    }
+
+    /// Whether enough of the rect shows in the area to see and grab it: more than the
+    /// sliver of a parked window, or all of it when it is smaller than that.
+    fn reachable(rect: Rect, area: Rect) bool {
+        const w = @min(float_reach_min, rect.w);
+        const h = @min(float_reach_min, rect.h);
+        return rect.overlap(area, .x) >= w and rect.overlap(area, .y) >= h;
     }
 
     /// A new window that floats is never moved to a tile, so it stays where its
@@ -2200,7 +2212,7 @@ pub const Engine = struct {
     fn float_rescue(engine: *Engine, window: *Window) void {
         if (engine.monitors_count == 0 or window.mode != .floating) return;
         const visible = engine.monitors[engine.workspace_monitor(window.workspace)].visible;
-        if (window.float_rect.intersects(visible)) return;
+        if (reachable(window.float_rect, visible)) return;
         const w = @min(window.float_rect.w, visible.w);
         const h = @min(window.float_rect.h, visible.h);
         window.float_rect = .{

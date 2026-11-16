@@ -60,7 +60,7 @@ exactly where the engine says it should be. See [docs/DESIGN.md](docs/DESIGN.md)
 Or via `make`: `make setup`, `make build`, `make test`, `make run` (stops any running
 instance, runs in the foreground, and restores the launchd agent on exit), and `make clean`.
 
-Apple Silicon macOS only.
+Apple Silicon and Intel macOS.
 
 ## Install
 

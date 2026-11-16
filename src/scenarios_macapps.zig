@@ -1155,6 +1155,19 @@ test "a floating window that opens off every display is brought into view" {
     try expect_frame(Rect.init(614, 427, 500, 300), lost);
 }
 
+// macOS reopens a window where it last was, and a window that was last on a hidden
+// workspace was last in its parking spot, with one pixel left on the display. That sliver
+// does not bring it into view: nobody can see or grab it.
+test "a floating window that opens where a hidden window waits is brought into view" {
+    const os = boot("");
+    const app = os.app_launch("System Settings", "com.apple.systempreferences");
+    const parked_spot = Rect.init(1727, 1000, 700, 600);
+    const settings = open(os, app, .{ .frame = parked_spot });
+    os.settle();
+    try testing.expectEqual(engine_module.Mode.floating, mode_of(settings));
+    try expect_frame(Rect.init(514, 277, 700, 600), settings);
+}
+
 // https://github.com/rxhanson/Rectangle/issues/779
 // https://github.com/rxhanson/Rectangle/issues/1552
 test "a floating window whose display is unplugged comes into view on the one left" {
