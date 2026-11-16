@@ -908,9 +908,9 @@ test "windows that macOS shuffles while the displays sleep are put back" {
     for (windows, frames) |id, frame| try expect_frame(frame, id);
     try testing.expectEqual(windows[0], engine.focused_window);
     // The same when the news of the shuffle only arrives together with the displays.
-    os.window_drag(windows[0], Rect.init(0, 25, 1024, 743));
-    os.window_drag(windows[1], Rect.init(0, 25, 1024, 743));
-    os.window_drag(windows[2], Rect.init(100, 125, 1024, 600));
+    self_move(os, windows[0], Rect.init(0, 25, 1024, 743));
+    self_move(os, windows[1], Rect.init(0, 25, 1024, 743));
+    self_move(os, windows[2], Rect.init(100, 125, 1024, 600));
     os.monitors_set(1);
     os.settle();
     try expect_frame(frames[0], windows[0]);

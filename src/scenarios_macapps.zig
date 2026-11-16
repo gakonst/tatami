@@ -1044,6 +1044,32 @@ test "a tile dragged onto a display with no tiles moves there" {
     try testing.expectEqual(@as(u8, 1), engine.focused_monitor);
 }
 
+test "a tile dragged to another display still moves there when its size changes" {
+    const os = boot("");
+    os.monitors_set(1); // Laptop on the left, external display on the right.
+    const app = os.app_launch("Zed", "dev.zed.Zed");
+    const a = open(os, app, .{});
+    const b = open(os, app, .{});
+    os.settle();
+    try expect_frame(right_half, b);
+    // macOS can clamp or round a window's size when it crosses onto another display.
+    os.window_drag(b, Rect.init(2400, 300, 864, 900));
+    os.settle();
+    try expect_frame(screen, a);
+    try expect_frame(external, b);
+    try testing.expectEqual(b, engine.focused_window);
+    try testing.expectEqual(@as(u8, 1), engine.focused_monitor);
+
+    // The same holds when the source workspace is stacked.
+    os.command_run("focus-monitor 1");
+    os.command_run("toggle accordion");
+    os.settle();
+    os.window_drag(a, Rect.init(2400, 300, 1500, 900));
+    os.settle();
+    try testing.expectEqual(@as(u8, 1), engine.workspace_monitor(engine.window_find(a).?.workspace));
+    try testing.expectEqual(@as(u8, 1), engine.focused_monitor);
+}
+
 // https://github.com/ianyh/Amethyst/issues/408
 // https://github.com/ianyh/Amethyst/issues/533
 // https://github.com/ianyh/Amethyst/issues/280

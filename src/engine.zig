@@ -2243,16 +2243,19 @@ pub const Engine = struct {
         assert(window.in_layout());
         const leaf = engine.forest.leaf_find(window.id);
         const old = window.desired;
+        const x = frame.center_x();
+        const y = frame.center_y();
+        const monitor = engine.monitor_at(x, y);
+        const on_other_monitor = monitor != null and
+            monitor.? != engine.workspace_monitor(window.workspace);
         if (engine.stacked(window)) {
             // The tiles under the pointer are the hidden layout: only a drop on another
             // monitor counts, and the window snaps back from anything else.
-            if (!frame.same_size(old)) return;
-            return engine.tile_drop_elsewhere(window, frame.center_x(), frame.center_y());
+            if (!frame.same_size(old) and !on_other_monitor) return;
+            return engine.tile_drop_elsewhere(window, x, y);
         }
-        if (frame.same_size(old)) {
+        if (frame.same_size(old) or on_other_monitor) {
             // Dropped on another tiled window: trade places with it.
-            const x = frame.center_x();
-            const y = frame.center_y();
             const target = engine.window_at(x, y, window) orelse {
                 return engine.tile_drop_elsewhere(window, x, y);
             };
