@@ -28,3 +28,41 @@ jobs:
 
       - name: Run tests
         run: ./zig/zig build test --summary all
+
+      - name: Run simulation and benchmarks
+        run: |
+          set -euo pipefail
+          bench_out=$(./zig-out/bin/tatami bench)
+          echo "$bench_out"
+          sim_out=$(./zig-out/bin/tatami-sim 1 2000 --seeds 100 2>&1)
+          echo "$sim_out"
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### Benchmarks (\`tatami bench\`)"
+              echo '```'
+              echo "$bench_out"
+              echo '```'
+              echo "### Simulation (\`tatami-sim 1 2000 --seeds 100\`)"
+              echo '```'
+              echo "$sim_out"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Guard against algorithmic performance regressions (ceilings are generous for CI variance).
+          echo "$bench_out" | awk -F': ' '
+            {
+              split($2, a, " ")
+              ns = a[1] + 0
+              if (ns > 100000) {
+                printf "FAIL: benchmark \"%s\" took %d ns per command (limit: 100000 ns)\n", $1, ns > "/dev/stderr"
+                exit 1
+              }
+            }
+          '
+          sim_ms=$(echo "$sim_out" | sed -n 's/.* \([0-9][0-9]*\) ms$/\1/p')
+          if [ -n "$sim_ms" ] && [ "$sim_ms" -gt 15000 ]; then
+            echo "FAIL: simulation took ${sim_ms} ms (limit: 15000 ms)" >&2
+            exit 1
+          fi
