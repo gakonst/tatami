@@ -57,12 +57,15 @@ exactly where the engine says it should be. See [docs/DESIGN.md](docs/DESIGN.md)
 ./scripts/sim-find.sh 1 3000 5000       # seeds 1..3000, 5000 steps each
 ```
 
+Or via `make`: `make setup`, `make build`, `make test`, `make run` (stops any running
+instance, runs in the foreground, and restores the launchd agent on exit), and `make clean`.
+
 Apple Silicon macOS only.
 
 ## Install
 
 ```sh
-./scripts/install.sh    # starts at login; see docs/INSTALL.md
+./scripts/install.sh    # starts at login; see docs/INSTALL.md (or: make install / make uninstall)
 ```
 
 ## Use
