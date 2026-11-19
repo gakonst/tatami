@@ -283,7 +283,7 @@ fn running_apps(apps: []RunningApp) usize {
     while (index < total and count < apps.len) : (index += 1) {
         const app = c.send_index(running, "objectAtIndex:", index);
         if (c.send_integer(app, "activationPolicy") != 0) continue;
-        apps[count].pid = @intCast(c.send_integer(app, "processIdentifier"));
+        apps[count].pid = c.send_i32(app, "processIdentifier");
         var buffer: [256]u8 = undefined;
         const name = ax.string_utf8(c.send(app, "localizedName"), &buffer);
         apps[count].name_len = stdx.copy_truncate(&apps[count].name, name);

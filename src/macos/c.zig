@@ -281,6 +281,13 @@ pub fn send_integer(object: Ref, selector: [*:0]const u8) isize {
     return function(object, sel_registerName(selector));
 }
 
+/// For selectors that return a 32-bit int (pid_t): on arm64 the upper half of x0 is
+/// undefined for such a return, so it must not be read as isize.
+pub fn send_i32(object: Ref, selector: [*:0]const u8) i32 {
+    const function: *const fn (Ref, Ref) callconv(.c) i32 = @ptrCast(&objc_msgSend);
+    return function(object, sel_registerName(selector));
+}
+
 pub fn send_rect(object: Ref, selector: [*:0]const u8) CGRect {
     // On arm64 a CGRect comes back in d0-d3 through plain objc_msgSend.
     if (comptime builtin.cpu.arch == .x86_64) {

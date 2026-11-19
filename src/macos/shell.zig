@@ -501,7 +501,7 @@ fn focused_window_id(discover: bool) u32 {
     const workspace = c.send(c.objc_getClass("NSWorkspace"), "sharedWorkspace");
     const front = c.send(workspace, "frontmostApplication");
     if (front == null) return 0;
-    const pid: i32 = @intCast(c.send_integer(front, "processIdentifier"));
+    const pid: i32 = c.send_i32(front, "processIdentifier");
     const app = app_find(pid) orelse return 0;
     if (!app.ready) return 0;
     const element = ax.copy(app.element, ax.names.focused_window) catch return 0;
@@ -968,7 +968,7 @@ fn apps_adopt() void {
     var index: usize = 0;
     while (index < count and pids_count < pids.len) : (index += 1) {
         const app = c.send_index(running, "objectAtIndex:", index);
-        pids[pids_count] = @intCast(c.send_integer(app, "processIdentifier"));
+        pids[pids_count] = c.send_i32(app, "processIdentifier");
         pids_count += 1;
     }
     adopting = true;
