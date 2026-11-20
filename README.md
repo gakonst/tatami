@@ -136,8 +136,10 @@ The focused window gets a border, as in i3: `border width 3`, `border radius 12`
 It is a transparent window of tatami's own, ordered just above the focused window and
 deaf to the mouse, so it needs no SIP change and no permission beyond Accessibility. It
 hides while the window is dragged, minimized, hidden, in native fullscreen or on a
-workspace that does not show. tatami becomes an accessory application to show it (no Dock
-icon, no menu bar), because macOS draws nothing for a bare binary's windows.
+workspace that does not show. Where the window meets a rounded corner of the display, as
+on a MacBook Pro, the border follows the panel's curve, which has no pixels past it.
+tatami becomes an accessory application to show it (no Dock icon, no menu bar), because
+macOS draws nothing for a bare binary's windows.
 
 ## What it does not do
 

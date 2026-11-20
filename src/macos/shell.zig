@@ -116,6 +116,10 @@ var monitors_guessed: bool = false;
 var monitors_force: bool = false;
 var monitors_seen: [engine_module.monitors_max]engine_module.MonitorInfo = undefined;
 var monitors_seen_count: u32 = 0;
+/// Each display's frame and panel outline, as monitors_read last found them, for the border,
+/// which holds its own reference to the outline it draws with.
+var displays: [engine_module.monitors_max]border.Display = undefined;
+var displays_count: u32 = 0;
 var probes: [probes_max]Probe = undefined;
 /// What the tatami that ran before this one left behind.
 var left: state_module.State = .{};
@@ -233,7 +237,12 @@ fn border_refresh(reorder: bool) void {
         return;
     }
     const before = border.target_shown();
-    border.show(id, target.?.actual, style, reorder);
+    const frame = target.?.actual;
+    var display = border.Display{ .frame = Rect.zero, .bezel = null };
+    for (displays[0..displays_count]) |candidate| {
+        if (candidate.frame.contains_point(frame.center_x(), frame.center_y())) display = candidate;
+    }
+    border.show(id, frame, display, style, reorder);
     if (before != id) border_reorder_at_ms = c.now_ms() + border_reorder_ms;
 }
 
@@ -1029,6 +1038,8 @@ pub fn monitors_read(out: *[engine_module.monitors_max]engine_module.MonitorInfo
     const screens = c.send(c.objc_getClass("NSScreen"), "screens");
     const screens_count: usize =
         if (screens == null) 0 else @intCast(c.send_integer(screens, "count"));
+    for (displays[0..displays_count]) |display| c.CGPathRelease(display.bezel);
+    displays_count = 0;
     var used: u32 = 0;
     monitors_guessed = false;
     for (ids[0..count]) |id| {
@@ -1039,20 +1050,44 @@ pub fn monitors_read(out: *[engine_module.monitors_max]engine_module.MonitorInfo
         var visible: Rect =
             .{ .x = frame.x, .y = frame.y + 25, .w = frame.w, .h = @max(0, frame.h - 25) };
         var known = false;
+        var bezel: c.Ref = null;
         var screen_index: usize = 0;
         while (screen_index < screens_count) : (screen_index += 1) {
             const screen = c.send_index(screens, "objectAtIndex:", screen_index);
             // AppKit measures from the bottom left of the primary display.
             if (!rect_from(c.send_rect(screen, "frame"), primary_height, true).eql(frame)) continue;
             visible = rect_from(c.send_rect(screen, "visibleFrame"), primary_height, true);
+            c.CGPathRelease(bezel);
+            bezel = screen_bezel(screen);
             known = true;
         }
+        displays[used] = .{ .frame = frame, .bezel = bezel };
         if (!known) monitors_guessed = true;
         const display = display_identity(id, out[0..used]);
         out[used] = .{ .display = display, .frame = frame, .visible = visible, .main = id == main };
         used += 1;
     }
+    displays_count = used;
     return used;
+}
+
+/// The outline of a display's pixels as a CGPath in points up from its bottom left: on a
+/// MacBook Pro, continuous curves that start 68 points from each corner at 1800x1182, which
+/// no circle of the private _cornerRadius (37 there) matches. macOS reports the outline
+/// only through NSScreen's private bezelPath, so a macOS without it gets null, and the
+/// border takes the display as square, as tatami drew it before.
+fn screen_bezel(screen: Ref) c.Ref {
+    const path = if (responds(screen, "bezelPath")) c.send(screen, "bezelPath") else null;
+    // NSBezierPath has a CGPath from macOS 14.
+    if (path == null or !responds(path, "CGPath")) return null;
+    const cg_path = c.send(path, "CGPath");
+    // CGPath comes autoreleased, and the pool lets it go before the border draws.
+    return if (cg_path == null) null else c.CGPathCreateCopy(cg_path);
+}
+
+fn responds(object: Ref, name: [*:0]const u8) bool {
+    const function: *const fn (Ref, Ref, Ref) callconv(.c) bool = @ptrCast(&c.objc_msgSend);
+    return function(object, c.sel_registerName("respondsToSelector:"), c.sel_registerName(name));
 }
 
 /// The number the engine knows a display by. macOS numbers a display anew when it is
