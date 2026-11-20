@@ -372,3 +372,17 @@ pub fn now_us() u64 {
 
 pub extern "c" fn CGColorCreateSRGB(r: f64, g: f64, b: f64, a: f64) Ref;
 pub extern "c" fn CGColorRelease(color: Ref) void;
+pub const CGAffineTransform = extern struct { a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64 };
+pub extern "c" fn CGPathCreateWithRect(rect: CGRect, transform: ?*const CGAffineTransform) Ref;
+/// Traps when a corner is more than half a side.
+pub extern "c" fn CGPathCreateWithRoundedRect(
+    rect: CGRect,
+    corner_width: f64,
+    corner_height: f64,
+    transform: ?*const CGAffineTransform,
+) Ref;
+pub extern "c" fn CGPathCreateCopy(path: Ref) Ref;
+pub extern "c" fn CGPathCreateCopyByTransformingPath(path: Ref, transform: *const CGAffineTransform) Ref;
+pub extern "c" fn CGPathCreateCopyBySubtractingPath(path: Ref, mask: Ref, even_odd: bool) Ref;
+pub extern "c" fn CGPathRetain(path: Ref) Ref;
+pub extern "c" fn CGPathRelease(path: Ref) void;
