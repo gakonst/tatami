@@ -603,18 +603,29 @@ final class VolumeSlider: NSView {
 
 // MARK: The bar
 
+struct BarState {
+    var workspaces: [Workspace] = []
+    var title = ""
+    var status = ""
+    var battery = ""
+    var tray: [TrayItem] = []
+}
+
+struct Surface {
+    let panel: NSPanel
+    let view: BarView
+}
+
 final class Bar: NSObject, NSApplicationDelegate {
     var cfg = BarConfig()
     var tatami = ""
-    var panel: NSPanel!
-    var view: BarView!
+    var state = BarState()
+    var surfaces: [Surface] = []
     let tray = Tray()
     var pending = false
     var hoverHidden = false
     var fullscreenHidden = false
     var hoverTimer: Timer?
-    var barHeight: CGFloat = 32
-    var screenTop: CGFloat = 0
     var hup: DispatchSourceSignal?
 
     func loadConfig() {
@@ -625,32 +636,17 @@ final class Bar: NSObject, NSApplicationDelegate {
                           (CommandLine.arguments[0] as NSString).deletingLastPathComponent + "/tatami",
                           "/opt/homebrew/bin/tatami", "/usr/local/bin/tatami"]
         tatami = candidates.first { !$0.isEmpty && FileManager.default.isExecutableFile(atPath: $0) } ?? candidates[1]
-        view?.cfg = cfg
-        view?.needsDisplay = true
+        render()
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        view = BarView()
         loadConfig()
-        panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
-                        backing: .buffered, defer: false)
-        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.statusWindow)) + 1)
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        panel.isOpaque = true
-        panel.hasShadow = false
-        panel.hidesOnDeactivate = false
-        panel.isMovable = false
-        panel.contentView = view
-        view.onPick = { n in self.show(n); DispatchQueue.global().async { _ = self.ask("workspace \(n)") } }
-        view.onHover = { outside in self.hover(outside) }
-        view.onTray = { id in self.pressTray(id) }
         layout()
-        panel.orderFrontRegardless()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { _ in self.layout() }
         // Light and dark mode: the default colours are the system's dynamic ones.
         DistributedNotificationCenter.default().addObserver(forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
-                                                            object: nil, queue: .main) { _ in self.view.needsDisplay = true }
+                                                            object: nil, queue: .main) { _ in self.render() }
         signal(SIGHUP, SIG_IGN)
         hup = DispatchSource.makeSignalSource(signal: SIGHUP, queue: .main)
         hup?.setEventHandler { self.loadConfig(); self.updateStatus(); self.updateTray(); self.refresh() }
@@ -666,21 +662,64 @@ final class Bar: NSObject, NSApplicationDelegate {
         Thread { self.follow() }.start()
     }
 
+    func makeSurface() -> Surface {
+        let view = BarView()
+        view.cfg = cfg
+        view.onPick = { n in self.show(n); DispatchQueue.global().async { _ = self.ask("workspace \(n)") } }
+        view.onHover = { outside in self.hover(outside) }
+        view.onTray = { id in self.pressTray(id, from: view) }
+
+        let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.statusWindow)) + 1)
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        panel.isOpaque = true
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.isMovable = false
+        panel.contentView = view
+        return Surface(panel: panel, view: view)
+    }
+
+    func render(display: Bool = false) {
+        for surface in surfaces {
+            surface.view.cfg = cfg
+            surface.view.workspaces = state.workspaces
+            surface.view.title = state.title
+            surface.view.status = state.status
+            surface.view.battery = state.battery
+            surface.view.tray = state.tray
+            if display { surface.view.display() } else { surface.view.needsDisplay = true }
+        }
+    }
+
     func layout() {
-        guard let s = NSScreen.screens.first else { return }
-        var h = s.frame.maxY - s.visibleFrame.maxY
-        if h < 20 { h = 32 }
-        barHeight = h
-        screenTop = s.frame.maxY
-        panel.setFrame(NSRect(x: s.frame.minX, y: s.frame.maxY - h, width: s.frame.width, height: h), display: true)
-        view.leftLimit = s.auxiliaryTopLeftArea?.width ?? s.frame.width * 0.5
-        view.needsDisplay = true
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+
+        if surfaces.count != screens.count {
+            for surface in surfaces { surface.panel.close() }
+            surfaces = screens.map { _ in makeSurface() }
+            render()
+            for surface in surfaces { surface.panel.orderFrontRegardless() }
+        }
+
+        for (surface, screen) in zip(surfaces, screens) {
+            var height = screen.frame.maxY - screen.visibleFrame.maxY
+            if height < 20 { height = 32 }
+            surface.panel.setFrame(NSRect(x: screen.frame.minX, y: screen.frame.maxY - height,
+                                          width: screen.frame.width, height: height), display: true)
+            surface.view.leftLimit = screen.auxiliaryTopLeftArea?.width ?? screen.frame.width * 0.5
+            surface.view.needsDisplay = true
+        }
     }
 
     func apply() {
         let hide = hoverHidden || fullscreenHidden
-        panel.alphaValue = hide ? 0 : 1
-        panel.ignoresMouseEvents = hide
+        for surface in surfaces {
+            surface.panel.alphaValue = hide ? 0 : 1
+            surface.panel.ignoresMouseEvents = hide
+        }
     }
 
     func hover(_ outside: Bool) {
@@ -696,7 +735,9 @@ final class Bar: NSObject, NSApplicationDelegate {
 
     func tick() {
         guard hoverHidden else { return }
-        if NSEvent.mouseLocation.y < screenTop - barHeight - 6 {
+        let mouse = NSEvent.mouseLocation
+        let stillInBar = surfaces.contains { $0.panel.frame.insetBy(dx: 0, dy: -6).contains(mouse) }
+        if !stillInBar {
             hoverHidden = false
             apply()
         }
@@ -709,15 +750,15 @@ final class Bar: NSObject, NSApplicationDelegate {
             for id in cfg.tray { if let p = self.tray.plugins[id] { found[id] = p.state(cfg) } }
             let states = found
             DispatchQueue.main.async {
-                self.view.tray = cfg.tray.map { id in
+                self.state.tray = cfg.tray.map { id in
                     TrayItem(id: id, icon: self.tray.icon(id), dot: states[id]?.0 ?? nil, text: states[id]?.1 ?? "")
                 }
-                self.view.needsDisplay = true
+                self.render()
             }
         }
     }
 
-    func pressTray(_ id: String) {
+    func pressTray(_ id: String, from view: BarView) {
         if let p = tray.plugins[id] {
             if let r = view.trayRects.first(where: { $0.1 == id })?.0 { p.menu(in: view, at: r) { self.updateTray() } }
             return
@@ -740,9 +781,9 @@ final class Bar: NSObject, NSApplicationDelegate {
     func updateStatus() {
         let f = DateFormatter()
         f.dateFormat = cfg.clockFormat
-        view.battery = battery()
-        view.status = cfg.clockFormat.isEmpty ? "" : f.string(from: Date())
-        view.needsDisplay = true
+        state.battery = battery()
+        state.status = cfg.clockFormat.isEmpty ? "" : f.string(from: Date())
+        render()
     }
 
     // tatami's control socket, the one "tatami <command>" uses: the request goes out, the
@@ -854,23 +895,23 @@ final class Bar: NSObject, NSApplicationDelegate {
             if let n = event["workspace"] as? Int { show(n) }
         case "focus_changed":
             guard let id = event["window"] as? Int, let w = known[id] else { return }
-            view.title = w.title
+            state.title = w.title
             fullscreenHidden = w.fullscreen
             apply()
-            view.display()
+            render(display: true)
         default:
             break
         }
     }
 
     func show(_ n: Int) {
-        var list = view.workspaces.map { Workspace(index: $0.index, focused: $0.index == n, label: $0.label) }
+        var list = state.workspaces.map { Workspace(index: $0.index, focused: $0.index == n, label: $0.label) }
         if !list.contains(where: { $0.index == n }) {
             list.append(Workspace(index: n, focused: true, label: ""))
             list.sort { $0.index < $1.index }
         }
-        view.workspaces = list
-        view.display()
+        state.workspaces = list
+        render(display: true)
     }
 
     struct Shown { var title: String; var fullscreen: Bool }
@@ -899,19 +940,19 @@ final class Bar: NSObject, NSApplicationDelegate {
 
     func render(_ snapshot: Snapshot?) {
         guard let s = snapshot else {
-            view.workspaces = []
-            view.title = "tatami is not running"
+            state.workspaces = []
+            state.title = "tatami is not running"
             fullscreenHidden = false
             apply()
-            view.needsDisplay = true
+            render()
             return
         }
         known = s.windows
-        view.workspaces = s.workspaces
-        view.title = s.title
+        state.workspaces = s.workspaces
+        state.title = s.title
         fullscreenHidden = s.fullscreen
         apply()
-        view.display()
+        render(display: true)
     }
 }
 
