@@ -858,6 +858,10 @@ final class Bar: NSObject, NSApplicationDelegate {
             fullscreenHidden = w.fullscreen
             apply()
             view.display()
+        case "view_changed":
+            // A window going into or out of fullscreen, among others: ask at once
+            // rather than at the next poll, so the bar is not drawn over a fullscreen video.
+            schedule()
         default:
             break
         }

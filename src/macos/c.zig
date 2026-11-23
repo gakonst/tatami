@@ -159,6 +159,16 @@ pub extern "c" fn AXObserverAddNotification(
 pub extern "c" fn AXObserverGetRunLoopSource(observer: Ref) Ref;
 /// Private, but the only way from an Accessibility element to a window id, and stable
 /// since 10.5. Every macOS window manager relies on it.
+// Spaces (CoreGraphics' private CGS calls, which SkyLight serves; read only, no SIP).
+pub const space_type_fullscreen: c_int = 4;
+pub const space_mask_all: c_int = 7;
+pub extern "c" fn CGSMainConnectionID() c_int;
+pub extern "c" fn CGSCopySpacesForWindows(connection: c_int, mask: c_int, windows: Ref) Ref;
+pub extern "c" fn CGSSpaceGetType(connection: c_int, space: u64) c_int;
+pub extern "c" fn CFNumberCreate(allocator: Ref, number_type: CFIndex, value: *const anyopaque) Ref;
+pub extern "c" fn CFArrayCreate(allocator: Ref, values: [*]const Ref, count: CFIndex, callbacks: ?*const anyopaque) Ref;
+pub extern "c" const kCFTypeArrayCallBacks: u8;
+pub const number_type_sint64: CFIndex = 4;
 pub extern "c" fn _AXUIElementGetWindow(element: Ref, window: *CGWindowID) AXError;
 
 // CoreGraphics.
