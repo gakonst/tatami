@@ -333,8 +333,14 @@ fn tabs_compare(os: *sim.Simulator, engine: *Engine) void {
 /// A floating window whose place is on no display.
 fn out_of_reach(engine: *const Engine, window: *const Window) bool {
     if (window.mode != .floating) return false;
+    const w = @min(engine_module.float_reach_min, window.float_rect.w);
+    const h = @min(engine_module.float_reach_min, window.float_rect.h);
     for (engine.monitors[0..engine.monitors_count]) |*monitor| {
-        if (window.float_rect.intersects(monitor.frame)) return false;
+        if (window.float_rect.overlap(monitor.frame, .x) >= w and
+            window.float_rect.overlap(monitor.frame, .y) >= h)
+        {
+            return false;
+        }
     }
     return engine.monitors_count > 0;
 }
