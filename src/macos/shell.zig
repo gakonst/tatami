@@ -96,6 +96,10 @@ const ShellWindow = struct {
     /// When to ask again whether it went into native fullscreen, 0 for never.
     fullscreen_probe_at_ms: u64 = 0,
     fullscreen_probe_tries: u8 = 0,
+    /// An application's own fullscreen window rather than native fullscreen: no standard
+    /// window, and it covers a whole display (VLC by default, games). It says nothing over
+    /// Accessibility, so covering the display is what makes it fullscreen.
+    own_fullscreen: bool = false,
 };
 
 /// Events that an effect leads to. They carry no slices, so they can wait in a queue while
@@ -589,15 +593,28 @@ fn window_discover(app: *ShellApp, element: Ref) Discovery {
     const id = ax.window_id(element);
     if (id == 0) return .not_a_window;
     if (window_find(id) != null) return .tracked;
-    const kind = ax.window_kind(element) orelse return .not_a_window;
-    if (kind == .popup) return .not_a_window;
-    const frame = ax.frame_get(element) catch return .failed;
+    var kind = ax.window_kind(element) orelse return .not_a_window;
+    const frame = if (kind == .popup)
+        ax.frame_get(element) catch return .not_a_window
+    else
+        ax.frame_get(element) catch return .failed;
+    // A popup is left alone, unless it is an application's own fullscreen: then it is
+    // taken as a window in native fullscreen, so that it has the focus, and the border
+    // and the bar get out of its way, instead of staying on the window it replaced.
+    const own_fullscreen = kind == .popup and covers_display(frame) and ax.on_screen(id);
+    if (kind == .popup and !own_fullscreen) return .not_a_window;
+    if (own_fullscreen) kind = .standard;
     var slot: ?*ShellWindow = null;
     for (&windows) |*window| {
         if (window.id == 0 and slot == null) slot = window;
     }
     const window = slot orelse return .failed;
-    window.* = .{ .id = id, .pid = app.pid, .element = c.CFRetain(element) };
+    window.* = .{
+        .id = id,
+        .pid = app.pid,
+        .element = c.CFRetain(element),
+        .own_fullscreen = own_fullscreen,
+    };
     const context: ?*anyopaque = @ptrFromInt(@as(usize, id));
     const per_window = [_]Ref{
         ax.names.destroyed,     ax.names.moved,        ax.names.resized,
@@ -608,7 +625,8 @@ fn window_discover(app: *ShellApp, element: Ref) Discovery {
     }
     var title_buffer: [1024]u8 = undefined;
     const title = ax.string_get(element, ax.names.title, &title_buffer);
-    log("window {d} pid={d} {s} '{s}'", .{ id, app.pid, @tagName(kind), title });
+    const shown = if (own_fullscreen) "own fullscreen" else @tagName(kind);
+    log("window {d} pid={d} {s} '{s}'", .{ id, app.pid, shown, title });
     dispatch(.{ .window_appeared = .{
         .id = id,
         .pid = app.pid,
@@ -617,7 +635,7 @@ fn window_discover(app: *ShellApp, element: Ref) Discovery {
         .kind = kind,
         .resizable = ax.settable(element, ax.names.size),
         .minimized = app.hidden or ax.bool_get(element, ax.names.minimized),
-        .fullscreen = ax.bool_get(element, ax.names.fullscreen),
+        .fullscreen = own_fullscreen or ax.bool_get(element, ax.names.fullscreen),
         .tab_of = tab_leader(app.pid, id, frame),
         .adopted = app.adopted,
         .workspace = if (app.adopted) left.window_find(id, app.pid) else null,
@@ -745,6 +763,12 @@ fn frame_report(window: *ShellWindow, by_user: bool) void {
         }
         return;
     };
+    // An application's own fullscreen window that no longer covers its display is a
+    // window we would not have taken: let it go rather than tile it.
+    if (window.own_fullscreen and !covers_display(frame)) {
+        window_forget(id);
+        return dispatch(.{ .window_destroyed = id });
+    }
     if (engine.window_find(id)) |known| {
         // Everything is asked before anything is dispatched: a dispatch can end with the
         // window forgotten, and then neither its element nor what the engine knew is
@@ -758,7 +782,9 @@ fn frame_report(window: *ShellWindow, by_user: bool) void {
         // An application that does not answer has not left fullscreen.
         const name = ax.names.fullscreen;
         const fullscreen = if (ask)
-            (ax.bool_get_checked(window.element, name) catch was) or on_fullscreen_space(id)
+            window.own_fullscreen or
+                (ax.bool_get_checked(window.element, name) catch was) or
+                on_fullscreen_space(id)
         else
             was;
         if (untabbed) dispatch(.{ .window_tab_changed = .{ .id = id, .tab_of = 0 } });
@@ -779,8 +805,16 @@ fn frame_report(window: *ShellWindow, by_user: bool) void {
 /// Whether the window says it is in native fullscreen. An application that does not
 /// answer is taken to be where it was.
 fn fullscreen_now(window: *const ShellWindow) bool {
-    if (on_fullscreen_space(window.id)) return true;
+    if (window.own_fullscreen or on_fullscreen_space(window.id)) return true;
     return ax.bool_get_checked(window.element, ax.names.fullscreen) catch false;
+}
+
+/// Whether the frame is exactly that of a whole display, menu bar and Dock included.
+fn covers_display(frame: Rect) bool {
+    for (engine.monitors[0..engine.monitors_count]) |*monitor| {
+        if (frame.eql(monitor.frame)) return true;
+    }
+    return false;
 }
 
 /// Whether the window is on a fullscreen space: what macOS made for a window in native
@@ -816,7 +850,9 @@ fn on_fullscreen_space(id: u32) bool {
 /// space, whose application is asked once to be sure.
 fn fullscreen_watch() void {
     for (&windows) |*window| {
-        if (window.id == 0) continue;
+        // An application's own fullscreen ends with its window closing or shrinking,
+        // which frame_report sees.
+        if (window.id == 0 or window.own_fullscreen) continue;
         const id = window.id;
         const known = engine.window_find(id) orelse continue;
         if (!known.fullscreen and id != engine.focused_window) continue;
